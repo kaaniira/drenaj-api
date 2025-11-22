@@ -18,8 +18,14 @@ def get_elevation(lat, lon):
         f"https://portal.opentopography.org/API/globaldem?"
         f"demtype=SRTMGL3&lat={lat}&lon={lon}&key={OPENTOPO_API_KEY}"
     )
-    r = requests.get(url).json()
-    return r["data"]["elevation"]
+    try:
+        r = requests.get(url, timeout=10)
+        if r.status_code != 200:
+            return None
+        data = r.json()
+        return data.get("data", {}).get("elevation", None)
+    except:
+        return None
 
 def compute_slope(lat, lon, dist_m=100):
     dlat = dist_m / 111320
