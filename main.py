@@ -2,8 +2,10 @@ from flask import Flask, request, jsonify
 import requests
 import math
 from statistics import mode
+from flask_cors import CORS
 
 app = Flask(__name__)
+CORS(app)
 
 def clip(x, a=0, b=1):
     return max(a, min(b, x))
