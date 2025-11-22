@@ -11,21 +11,32 @@ def clip(x, a=0, b=1):
 # ---------------------------
 # 1) EĞİM (OpenTopography)
 # ---------------------------
-OPENTOPO_API_KEY = "fbf76fcd2c25137d9bd8b5b46ec06250"
-
+# ---------------------------
+# 1) EĞİM (OpenElevation - Stabil)
+# ---------------------------
 def get_elevation(lat, lon):
-    url = (
-        f"https://portal.opentopography.org/API/globaldem?"
-        f"demtype=SRTMGL3&lat={lat}&lon={lon}&key={OPENTOPO_API_KEY}"
-    )
     try:
-        r = requests.get(url, timeout=10)
-        if r.status_code != 200:
-            return None
-        data = r.json()
-        return data.get("data", {}).get("elevation", None)
+        url = f"https://api.open-elevation.com/api/v1/lookup?locations={lat},{lon}"
+        r = requests.get(url, timeout=10).json()
+        return r["results"][0]["elevation"]
     except:
         return None
+
+
+def compute_slope(lat, lon, dist_m=100):
+    # Yaklaşık dereceye çeviri
+    dlat = dist_m / 111320
+
+    h0 = get_elevation(lat, lon)
+    h1 = get_elevation(lat + dlat, lon)
+
+    # Elevation alınamazsa düz alan kabul ediyoruz
+    if h0 is None or h1 is None:
+        return 0.0, 0.0
+
+    slope_percent = abs((h1 - h0) / dist_m) * 100
+    S = clip(slope_percent / 60)
+    return S, slope_percent
 
 def compute_slope(lat, lon, dist_m=100):
     dlat = dist_m / 111320
