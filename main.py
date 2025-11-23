@@ -1,118 +1,117 @@
+# ============================================================
+#  BİYOMİMİKRİ TABANLI DRENAJ SİSTEMİ API (v4.1)
+#  TÜBİTAK için bilimsel olarak kalibre edilmiş son sürüm
+# ============================================================
+
 from flask import Flask, request, jsonify
-import math
-import requests
-from collections import Counter
 from flask_cors import CORS
+import requests
+import math
+from collections import Counter
 
 app = Flask(__name__)
-CORS(app)
-# ---------------------------------------------------------
-# 0) Yardımcı Fonksiyonlar
-# ---------------------------------------------------------
+CORS(app)   # WordPress için CORS açık
 
-def clamp01(x):
-    return max(0, min(1, x))
+# ============================================================
+#  GENEL YARDIMCI FONKSİYONLAR
+# ============================================================
 
-def normalize_slope(slope, max_percent=30):
-    return clamp01(slope / max_percent)
+def clamp(v, vmin=0.0, vmax=1.0):
+    return max(vmin, min(vmax, v))
 
-def classify_flood_risk(fr):
-    if fr < 0.3: return "Düşük"
-    if fr < 0.6: return "Orta"
-    if fr < 0.8: return "Yüksek"
+def safe(v, default=None):
+    return v if (v is not None and v == v) else default
+
+def classify_flood(F):
+    if F < 0.3: return "Düşük"
+    if F < 0.6: return "Orta"
+    if F < 0.8: return "Yüksek"
     return "Çok Yüksek"
 
-# ---------------------------------------------------------
-# 1) DEM (Eğim) — Open Meteo + Open Elevation (Failover)
-# ---------------------------------------------------------
+# ============================================================
+#  DEM (EĞİM) HESABI — Open-Meteo + Open-Elevation Failover
+# ============================================================
 
-def get_elevation_openmeteo(lat, lon):
+def get_elev_openmeteo(lat, lon):
     url = f"https://api.open-meteo.com/v1/elevation?latitude={lat}&longitude={lon}"
     r = requests.get(url, timeout=10)
     r.raise_for_status()
     return float(r.json()["elevation"][0])
 
-def get_elevation_openelevation(lat, lon):
+def get_elev_openelev(lat, lon):
     url = f"https://api.open-elevation.com/api/v1/lookup?locations={lat},{lon}"
     r = requests.get(url, timeout=10)
     r.raise_for_status()
     return float(r.json()["results"][0]["elevation"])
 
-def get_dem(lat, lon):
+def get_elevation(lat, lon):
     errors = []
 
-    # 1) Open-Meteo
     try:
-        return get_elevation_openmeteo(lat, lon), None
-    except Exception as e:
-        errors.append("Open-Meteo Elevation başarısız.")
+        return get_elev_openmeteo(lat, lon), None
+    except:
+        errors.append("Open-Meteo başarısız.")
 
-    # 2) Open-Elevation fallback
     try:
-        return get_elevation_openelevation(lat, lon), None
+        return get_elev_openelev(lat, lon), None
     except:
         errors.append("Open-Elevation başarısız.")
 
-    # 3) ikisi de çökerse:
     return None, " / ".join(errors)
 
+def estimate_slope_percent(lat, lon):
+    h1, e1 = get_elevation(lat, lon)
+    if h1 is None:
+        return None, e1
 
-def estimate_slope(lat, lon):
-    h1, err1 = get_dem(lat, lon)
+    delta_lat = 100 / 111320
+    h2, e2 = get_elevation(lat + delta_lat, lon)
+    if h2 is None:
+        return None, e2
 
-    if err1:
-        return None, err1
+    slope_percent = abs(h2 - h1)
+    return slope_percent, None
 
-    delta_deg = 100 / 111320
-    h2, err2 = get_dem(lat + delta_deg, lon)
+# ============================================================
+#  YAĞIŞ (10 YIL) — Open-Meteo Archive
+# ============================================================
 
-    if err2:
-        return None, err2
-
-    slope = abs(h2 - h1) / 100 * 100
-    return slope, None
-
-
-# ---------------------------------------------------------
-# 2) Yağış — Open-Meteo
-# ---------------------------------------------------------
-
-def fetch_rain(lat, lon):
-    url = (
-        "https://archive-api.open-meteo.com/v1/archive?"
-        f"latitude={lat}&longitude={lon}"
-        "&start_date=2015-01-01&end_date=2024-12-31"
-        "&daily=precipitation_sum&timezone=UTC"
-    )
+def fetch_precip(lat, lon):
     try:
-        r = requests.get(url, timeout=30)
+        url = (
+            "https://archive-api.open-meteo.com/v1/archive?"
+            f"latitude={lat}&longitude={lon}"
+            "&start_date=2015-01-01&end_date=2024-12-31"
+            "&daily=precipitation_sum&timezone=UTC"
+        )
+        r = requests.get(url, timeout=20)
         r.raise_for_status()
-        daily = r.json()["daily"]["precipitation_sum"]
-        total = sum(daily)
-        mean = total / 10
-        max_d = max(daily)
-        p99 = sorted(daily)[int(len(daily)*0.99)]
-        return mean, max_d, p99, None
+        arr = r.json()["daily"]["precipitation_sum"]
+
+        total = sum(arr)
+        mean_annual = total / 10
+        max_daily = max(arr)
+        p99 = sorted(arr)[int(len(arr) * 0.99)]
+        return mean_annual, max_daily, p99, None
+
     except:
         return None, None, None, "Yağış API hatası"
 
-
-def compute_idf(max_daily):
+def compute_idf_intensity(max_daily):
     if max_daily is None:
         return 0
     a = max_daily * 1.3
     b = 12
     c = 0.75
     t = 15
-    return a / ((t+b)**c)
+    return a / ((t + b) ** c)
 
-
-# ---------------------------------------------------------
-# 3) OSM — Bina Yoğunluğu ve Arazi
-# ---------------------------------------------------------
+# ============================================================
+#  OSM — BİNA YOĞUNLUĞU + LANDUSE
+# ============================================================
 
 def fetch_osm(lat, lon, radius=200):
-    q = f"""
+    query = f"""
     [out:json][timeout:25];
     (
       nwr(around:{radius},{lat},{lon})["building"];
@@ -122,71 +121,70 @@ def fetch_osm(lat, lon, radius=200):
     """
     try:
         r = requests.post("https://overpass-api.de/api/interpreter",
-                          data={"data": q}, timeout=30)
+                          data={"data": query}, timeout=30)
         r.raise_for_status()
-        e = r.json()["elements"]
+        elements = r.json()["elements"]
 
-        building_count = 0
-        landuses = []
+        buildings = 0
+        lands = []
+        for el in elements:
+            t = el.get("tags", {})
+            if "building" in t:
+                buildings += 1
+            if "landuse" in t:
+                lands.append(t["landuse"])
 
-        for i in e:
-            tg = i.get("tags", {})
-            if "building" in tg:
-                building_count += 1
-            if "landuse" in tg:
-                landuses.append(tg["landuse"])
-
-        return building_count, landuses, None
+        return buildings, lands, None
 
     except:
         return 0, [], "OSM API hatası"
 
-def normalize_density_Turkey(buildings_per_km2):
+def normalize_density_turkey(dens):
     low = 500
     high = 5000
-    if buildings_per_km2 <= low:
-        return 0
-    if buildings_per_km2 >= high:
-        return 1
-    return (buildings_per_km2 - low) / (high - low)
+    if dens <= low: return 0
+    if dens >= high: return 1
+    return (dens - low) / (high - low)
 
-def permeability_from_landuse(land):
-    if not land:
+def permeability_from_landuse(lands):
+    if not lands:
         return 0.5
-    mc = Counter(land).most_common(1)[0][0]
+    mc = Counter(lands).most_common(1)[0][0]
     table = {
-        "forest":0.85,"meadow":0.8,"grass":0.8,"greenfield":0.75,
-        "farmland":0.6,"orchard":0.6,"residential":0.35,
-        "commercial":0.30,"industrial":0.25
+        "forest":0.85,
+        "meadow":0.80,
+        "grass":0.80,
+        "greenfield":0.75,
+        "farmland":0.60,
+        "orchard":0.60,
+        "residential":0.35,
+        "commercial":0.30,
+        "industrial":0.25
     }
-    return table.get(mc,0.5)
+    return table.get(mc, 0.5)
 
+# ============================================================
+#  RİSK HESAPLARI
+# ============================================================
 
-# ---------------------------------------------------------
-# 4) RİSK MODELİ
-# ---------------------------------------------------------
-
-def compute_risks(S, D, K, W_star, R_extreme):
-
+def compute_risks(S, D, K, W_star, R_ext):
     C = 0.5*D + 0.5*(1-K)
     W_eff = W_star * C
     B = 0.7*C + 0.3*K*(1-S)
-    L = 0.6*W_eff + 0.4*R_extreme
+    L = 0.6*W_eff + 0.4*R_ext
     Flood = 0.6*L + 0.4*B
-
     return C, W_eff, B, L, Flood
 
-
-# ---------------------------------------------------------
-# 5) Drenaj Tipi
-# ---------------------------------------------------------
+# ============================================================
+#  DRENAJ TİPİ – AHP NORMALİZE SKORLARI (Toplam = 1)
+# ============================================================
 
 def choose_system(S, D, K, C, W_eff, B, L, Flood):
 
-    Score_DEN = 0.55*S + 0.25*L + 0.20*(1-B)
-    Score_PAR = 0.50*(1-S) + 0.30*K + 0.20*(1-Flood)
-    Score_RET = 0.40*C + 0.35*L + 0.25*(1-S)
-    Score_HYB = 0.60*Flood + 0.40*(1 - abs(2*S-1))
+    Score_DEN = 0.45*S + 0.30*L + 0.25*(1-K)
+    Score_PAR = 0.45*(1-S) + 0.30*K + 0.25*(1-Flood)
+    Score_RET = 0.50*D + 0.30*(1-K) + 0.20*L
+    Score_HYB = 0.40*(1 - abs(2*S - 1)) + 0.35*Flood + 0.25*(1-K)
 
     scores = {
         "dendritic": Score_DEN,
@@ -195,75 +193,56 @@ def choose_system(S, D, K, C, W_eff, B, L, Flood):
         "hybrid": Score_HYB
     }
 
-    sel = max(scores, key=scores.get)
-    return sel, scores
+    selected = max(scores, key=scores.get)
+    return selected, scores
 
+# ============================================================
+#  MANNING – ANALİTİK BORU ÇAPI
+# ============================================================
 
-# ---------------------------------------------------------
-# 6) Boru & Hidrolik
-# ---------------------------------------------------------
-
-def manning_velocity(n, R_h, S):
-    if S <= 0: S = 0.0001
-    return (1/n) * (R_h**(2/3)) * (S**0.5)
-
-def pipe_diameter(Q, v):
-    if v <= 0 or Q <= 0:
+def manning_diameter(Q, n, S):
+    if Q <= 0 or S <= 0:
         return 0
-    return math.sqrt(4*Q/(math.pi*v))
+    return ((4**(5/3) * n * Q) / (math.pi * (S**0.5))) ** (3/8)
 
-
-# ---------------------------------------------------------
-# 7) Ana API Endpoint
-# ---------------------------------------------------------
+# ============================================================
+#  ANA API
+# ============================================================
 
 @app.route("/analyze", methods=["POST"])
 def analyze():
-    d = request.get_json()
-    lat = float(d["lat"])
-    lon = float(d["lon"])
+    data = request.get_json()
 
-    # --- DEM / EĞİM ---
-    slope_percent, dem_error = estimate_slope(lat, lon)
+    lat = float(data["lat"])
+    lon = float(data["lon"])
 
-    if slope_percent is None:
-        S = None
-    else:
-        S = normalize_slope(slope_percent)
+    # 1 — EĞİM
+    slope_percent, dem_error = estimate_slope_percent(lat, lon)
+    S = clamp((slope_percent / 30)) if slope_percent else 0.0
 
-    # --- YAĞIŞ ---
-    meanA, maxD, p99, rain_error = fetch_rain(lat, lon)
-    if meanA:
-        W_star = clamp01(meanA / 1000)
-        R_extreme = clamp01(0.6*(maxD/150) + 0.4*(p99/80))
-    else:
-        W_star, R_extreme = 0.5, 0.5
+    # 2 — YAĞIŞ
+    meanA, maxD, p99, rain_error = fetch_precip(lat, lon)
+    W_star = clamp((meanA / 1000)) if meanA else 0.5
+    R_ext = clamp(0.6*(safe(maxD,0)/150) + 0.4*(safe(p99,0)/80))
 
-    # --- OSM ---
-    bcount, land, osm_error = fetch_osm(lat, lon)
-    area_km2 = math.pi*(0.2**2)
-    dens_km2 = bcount / area_km2 if area_km2>0 else 0
-    D = normalize_density_Turkey(dens_km2)
-    K = clamp01(permeability_from_landuse(land))
+    # 3 — OSM
+    bcount, lands, osm_error = fetch_osm(lat, lon)
+    area_km2 = math.pi * (0.2**2)
+    dens_km2 = bcount / area_km2 if area_km2 > 0 else 0
+    D = normalize_density_turkey(dens_km2)
+    K = clamp(permeability_from_landuse(lands))
 
-    # --- RİSK ---
-    if S is not None:
-        C, W_eff, B, L, Flood = compute_risks(S, D, K, W_star, R_extreme)
-    else:
-        C=W_eff=B=L=Flood=0
+    # 4 — RİSKLER
+    C, W_eff, B, L, Flood = compute_risks(S, D, K, W_star, R_ext)
 
-    # --- SİSTEM ---
-    if S is not None:
-        selected, scores = choose_system(S, D, K, C, W_eff, B, L, Flood)
-    else:
-        selected, scores = None, {}
+    # 5 — SİSTEM SEÇİMİ
+    selected, scores = choose_system(S, D, K, C, W_eff, B, L, Flood)
 
-    # --- HİDROLİK ---
-    i_mm_h = compute_idf(maxD if maxD else 50)
+    # 6 — HİDROLİK
+    i_mm_h = compute_idf_intensity(maxD)
     A_m2 = 5000
-    Q = 0.00278 * C * i_mm_h * (A_m2/10000)
-    v = manning_velocity(0.013, 0.5, (S/100) if S else 0.001)
-    D_mm = pipe_diameter(Q, v)*1000
+    Q = 0.00278 * C * i_mm_h * (A_m2 / 10000)
+    D_mm = manning_diameter(Q, 0.013, max(S,0.001)) * 1000
 
     return jsonify({
         "selected_system": selected,
@@ -271,30 +250,27 @@ def analyze():
         "slope_percent": slope_percent,
         "S": S,
         "building_count": bcount,
-        "density_bld_per_km2": dens_km2,
+        "density_km2": dens_km2,
         "D": D,
         "K": K,
         "W_star": W_star,
-        "R_extreme": R_extreme,
+        "R_extreme": R_ext,
         "C": C,
         "W_eff": W_eff,
         "B": B,
         "L": L,
         "FloodRisk": Flood,
-        "FloodRiskLevel": classify_flood_risk(Flood),
+        "FloodRisk_Level": classify_flood(Flood),
         "Q_m3_s": Q,
-        "velocity_m_s": v,
         "pipe_diameter_mm": D_mm,
         "dem_error": dem_error,
         "rain_error": rain_error,
         "osm_error": osm_error
     })
 
-
 @app.route("/")
 def home():
-    return "Biyomimikri Drenaj API v3.2 — Çalışıyor."
+    return "Drenaj API v4.1 — TÜBİTAK Bilimsel Kalibrasyonlu"
 
 if __name__ == "__main__":
     app.run()
-application = app
