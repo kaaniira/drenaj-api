@@ -101,33 +101,44 @@ def compute_idf_intensity(max_daily):
 # ------------------------------------------------------------
 
 def fetch_osm(lat, lon, radius=200):
+
     query = f"""
-    [out:json][timeout:25];
+    [out:json][timeout:60];
     (
       nwr(around:{radius},{lat},{lon})["building"];
       nwr(around:{radius},{lat},{lon})["landuse"];
     );
     out tags;
     """
-    try:
-        r = requests.post("https://overpass-api.de/api/interpreter",
-                          data={"data": query}, timeout=30)
-        r.raise_for_status()
-        elements = r.json()["elements"]
 
-        buildings = 0
-        lands = []
+    urls = [
+        "https://overpass-api.de/api/interpreter",
+        "https://overpass.kumi.systems/api/interpreter"
+    ]
 
-        for el in elements:
-            tags = el.get("tags", {})
-            if "building" in tags:
-                buildings += 1
-            if "landuse" in tags:
-                lands.append(tags["landuse"])
+    for url in urls:
+        for _ in range(3):
+            try:
+                r = requests.post(url, data={"data": query}, timeout=30)
+                r.raise_for_status()
+                data = r.json().get("elements", [])
 
-        return buildings, lands, None
-    except:
-        return 0, [], "OSM API hatası"
+                buildings = 0
+                lands = []
+
+                for el in data:
+                    tags = el.get("tags", {})
+                    if "building" in tags:
+                        buildings += 1
+                    if "landuse" in tags:
+                        lands.append(tags["landuse"])
+
+                return buildings, lands, None
+            except:
+                pass
+
+    return 0, [], "OSM API tüm denemelerde başarısız"
+
 
 
 # ------------------------------------------------------------
@@ -171,32 +182,43 @@ def permeability_from_landuse(lands):
 # ------------------------------------------------------------
 
 def fetch_osm_roads(lat, lon, radius=200):
+
     query = f"""
-    [out:json][timeout:25];
+    [out:json][timeout:60];
     way(around:{radius},{lat},{lon})["highway"];
     out geom;
     """
-    try:
-        r = requests.post("https://overpass-api.de/api/interpreter",
-                          data={"data": query}, timeout=30)
-        r.raise_for_status()
-        elements = r.json()["elements"]
 
-        total_len = 0.0
+    urls = [
+        "https://overpass-api.de/api/interpreter",
+        "https://overpass.kumi.systems/api/interpreter"
+    ]
 
-        for el in elements:
-            geom = el.get("geometry", [])
-            for i in range(len(geom) - 1):
-                lat1, lon1 = geom[i]["lat"], geom[i]["lon"]
-                lat2, lon2 = geom[i+1]["lat"], geom[i+1]["lon"]
+    for url in urls:
+        for _ in range(3):
+            try:
+                r = requests.post(url, data={"data": query}, timeout=30)
+                r.raise_for_status()
+                elements = r.json().get("elements", [])
 
-                dx = (lon2 - lon1) * 85000
-                dy = (lat2 - lat1) * 111320
-                total_len += (dx*dx + dy*dy)**0.5
+                total_len = 0.0
 
-        return total_len, None
-    except:
-        return 0, "Roads API hatası"
+                for el in elements:
+                    geom = el.get("geometry", [])
+                    for i in range(len(geom) - 1):
+                        lat1, lon1 = geom[i]["lat"], geom[i]["lon"]
+                        lat2, lon2 = geom[i+1]["lat"], geom[i+1]["lon"]
+
+                        dx = (lon2 - lon1) * 85000
+                        dy = (lat2 - lat1) * 111320
+                        total_len += math.sqrt(dx*dx + dy*dy)
+
+                return total_len, None
+
+            except:
+                pass
+
+    return 0, "Roads API tüm denemelerde başarısız"
 
 
 def estimate_catchment_area(total_road_m, D, K):
