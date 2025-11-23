@@ -433,4 +433,87 @@ def analyze():
 def home():
     return "Drenaj API v6.0 — Yeni Sel Riski + Açıklama Motoru"
 
+@app.route("/manual", methods=["POST"])
+def manual():
+    data = request.get_json()
+
+    # ZORUNLU inputlar
+    slope_percent = float(data.get("slope_percent", 0))
+    bcount = float(data.get("building_count", 0))
+    dens_km2 = float(data.get("dens_km2", 0))
+    lands = data.get("landuse", [])
+    meanA = float(data.get("meanA", 0))
+    maxD = float(data.get("maxD", 0))
+    p99 = float(data.get("p99", 0))
+    road_len = float(data.get("road_length_m", 0))
+
+    # Normalize eğim
+    S = clamp(slope_percent / 30)    
+
+    # Manning taban eğimi
+    raw_bed_slope = slope_percent / 100
+    S_bed = max(0.003, min(raw_bed_slope, 0.03))
+
+    # Yoğunluk skoru
+    D = normalize_density_turkey(dens_km2)
+
+    # Geçirgenlik
+    K = clamp(permeability_from_landuse(lands))
+
+    # Yağış skorları
+    Wstar = clamp(meanA / 1000)
+    Rext = clamp(0.6*(maxD/150) + 0.4*(p99/80))
+
+    # Havza alanı
+    A_m2 = estimate_catchment_area(road_len, D, K)
+
+    # Risk hesapları
+    C, W_eff, B, L, Flood = compute_risks(S, D, K, Wstar, Rext)
+
+    # Sistem seçimi
+    selected, scores = choose_system(S, D, K, C, W_eff, B, L, Flood)
+
+    # Hidrolik hesap
+    i_mm_h = compute_idf_intensity(maxD)
+    A_ha = A_m2 / 10000
+    Q = 0.278 * C * i_mm_h * A_ha
+    D_mm = manning_diameter(Q, 0.013, S_bed) * 1000
+    velocity = (Q / (math.pi*(D_mm/1000)**2/4)) if D_mm > 0 else 0
+
+    scale_name, scale_icon = classify_scale(D_mm, Q, A_m2)
+    material = recommend_material(D_mm, velocity, Q)
+
+    return jsonify({
+        "selected_system": selected,
+        "scores": scores,
+        "S": S,
+        "slope_percent": slope_percent,
+        "building_count": bcount,
+        "density_bld_per_km2": dens_km2,
+        "D": D,
+        "lands": lands,
+        "K": K,
+        "W_star": Wstar,
+        "R_extreme": Rext,
+        "C": C,
+        "W_eff": W_eff,
+        "B": B,
+        "L": L,
+        "FloodRisk": Flood,
+        "FloodRiskLevel": (
+            "Düşük" if Flood < 0.3 else
+            "Orta" if Flood < 0.6 else
+            "Yüksek" if Flood < 0.8 else
+            "Çok Yüksek"
+        ),
+        "catchment_area_m2": A_m2,
+        "road_length_m": road_len,
+        "Q_m3_s": Q,
+        "pipe_diameter_mm": D_mm,
+        "velocity_m_s": velocity,
+        "scale_name": scale_name,
+        "scale_icon": scale_icon,
+        "material": material
+    })
+
 application = app
