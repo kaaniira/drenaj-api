@@ -242,7 +242,7 @@ def analyze():
     # --- OSM ---
     bcount, land, osm_error = fetch_osm(lat, lon)
     area_km2 = math.pi*(0.2**2)
-    dens_km2 = bcount / area_k2 if area_km2>0 else 0
+    dens_km2 = bcount / area_km2 if area_km2>0 else 0
     D = normalize_density_Turkey(dens_km2)
     K = clamp01(permeability_from_landuse(land))
 
