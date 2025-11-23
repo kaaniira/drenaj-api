@@ -350,8 +350,8 @@ def analyze():
         "dem_error": dem_error,
         "rain_error": rain_error,
         "osm_error": osm_error,
-        "roads_error": roads_error
-        "scale": scale_class,
+        "roads_error": roads_error,
+        "scale": scale_class
 
     })
 
