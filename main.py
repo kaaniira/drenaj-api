@@ -431,7 +431,7 @@ def analyze():
 
 @app.route("/")
 def home():
-    return "Drenaj API v6.0 — Yeni Sel Riski + Açıklama Motoru"
+    return "Drenaj API v6.1 — BioFlow API"
 
 @app.route("/manual", methods=["POST"])
 def manual():
