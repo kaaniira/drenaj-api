@@ -262,13 +262,17 @@ def manning_diameter(Q, n, S):
 def classify_scale(D_mm, Q, A_m2):
     A_ha = A_m2 / 10000.0
 
-    if D_mm < 500 or Q < 1 or A_ha < 3:
-        return "Sokak Hattı (Street Drain)"
+    # Street Drain
+    if D_mm < 500 and Q < 1.5 and A_ha < 3:
+        return "Sokak Hattı", "🟩"
 
-    if (500 <= D_mm < 1000) or (1 <= Q < 5) or (3 <= A_ha < 10):
-        return "Mahalle Kolektörü (Secondary Collector)"
+    # Secondary Collector
+    if (500 <= D_mm < 1000) or (1.5 <= Q < 5) or (3 <= A_ha < 10):
+        return "Mahalle Kolektörü", "🟨"
 
-    return "Ana Kolektör / Trunk Hattı (Major Drainage Trunk)"
+    # Major Trunk
+    return "Ana Kolektör / Trunk", "🟥"
+
 
 
 @app.route("/analyze", methods=["POST"])
@@ -317,6 +321,7 @@ def analyze():
     velocity = (Q / (math.pi*(D_mm/1000)**2/4)) if D_mm > 0 else 0
 
     scale_class = classify_scale(D_mm, Q, A_m2)
+    scale_name, scale_icon = classify_scale(D_mm, Q, A_m2)
 
 
     return jsonify({
@@ -351,7 +356,9 @@ def analyze():
         "rain_error": rain_error,
         "osm_error": osm_error,
         "roads_error": roads_error,
-        "scale": scale_class
+        "scale": scale_class,
+        "scale": scale_name,
+        "scale_icon": scale_icon,
 
     })
 
