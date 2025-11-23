@@ -259,6 +259,18 @@ def manning_diameter(Q, n, S):
 #  ANA API
 # ============================================================
 
+def classify_scale(D_mm, Q, A_m2):
+    A_ha = A_m2 / 10000.0
+
+    if D_mm < 500 or Q < 1 or A_ha < 3:
+        return "Sokak Hattı (Street Drain)"
+
+    if (500 <= D_mm < 1000) or (1 <= Q < 5) or (3 <= A_ha < 10):
+        return "Mahalle Kolektörü (Secondary Collector)"
+
+    return "Ana Kolektör / Trunk Hattı (Major Drainage Trunk)"
+
+
 @app.route("/analyze", methods=["POST"])
 def analyze():
     data = request.get_json()
@@ -304,6 +316,9 @@ def analyze():
     D_mm = manning_diameter(Q, 0.013, S_bed) * 1000
     velocity = (Q / (math.pi*(D_mm/1000)**2/4)) if D_mm > 0 else 0
 
+    scale_class = classify_scale(D_mm, Q, A_m2)
+
+
     return jsonify({
         "selected_system": selected,
         "scores": scores,
@@ -336,6 +351,8 @@ def analyze():
         "rain_error": rain_error,
         "osm_error": osm_error,
         "roads_error": roads_error
+        "scale": scale_class,
+
     })
 
 @app.route("/")
