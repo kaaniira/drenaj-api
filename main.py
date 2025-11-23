@@ -268,7 +268,12 @@ def analyze():
 
     # --- Eğim ---
     slope_percent, dem_error = estimate_slope_percent(lat, lon)
+    # Normalize eğim (AHP için)
     S = clamp((slope_percent / 30)) if slope_percent else 0.0
+
+    # Manning için taban eğimi (m/m) – 0.3% ile 3% arasında sınırla
+    raw_bed_slope = (slope_percent or 0) / 100.0
+    S_bed = max(0.003, min(raw_bed_slope, 0.03))
 
     # --- Yağış ---
     meanA, maxD, p99, rain_error = fetch_precip(lat, lon)
@@ -294,8 +299,9 @@ def analyze():
 
     # --- Hidrolik ---
     i_mm_h = compute_idf_intensity(maxD)
-    Q = 0.00278 * C * i_mm_h * (A_m2 / 10000)
-    D_mm = manning_diameter(Q, 0.013, max(S,0.001)) * 1000
+    A_ha = A_m2 / 10000.0        # m² → hektar
+    Q = 0.278 * C * i_mm_h * A_ha
+    D_mm = manning_diameter(Q, 0.013, S_bed) * 1000
     velocity = (Q / (math.pi*(D_mm/1000)**2/4)) if D_mm > 0 else 0
 
     return jsonify({
