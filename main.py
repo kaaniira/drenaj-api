@@ -273,6 +273,23 @@ def classify_scale(D_mm, Q, A_m2):
     # Major Trunk
     return "Ana Kolektör / Trunk", "🟥"
 
+def recommend_material(D_mm, velocity, Q):
+    # Polyester (GRP)
+    if D_mm >= 1200:
+        return "GRP (Cam Elyaf Takviyeli Polyester)"
+
+    # Beton
+    if 600 <= D_mm < 1200:
+        return "Betonarme Boru"
+
+    # PE100 (HDPE)
+    if 200 <= D_mm < 600:
+        return "PE100 / HDPE"
+
+    # PVC (küçük çaplar)
+    return "PVC veya PP"
+
+
 
 
 @app.route("/analyze", methods=["POST"])
@@ -322,6 +339,8 @@ def analyze():
 
     scale_class = classify_scale(D_mm, Q, A_m2)
     scale_name, scale_icon = classify_scale(D_mm, Q, A_m2)
+    material = recommend_material(D_mm, velocity, Q)
+
 
 
     return jsonify({
@@ -357,8 +376,10 @@ def analyze():
         "osm_error": osm_error,
         "roads_error": roads_error,
         "scale": scale_class,
-        "scale": scale_name,
+        "scale_name": scale_name,
         "scale_icon": scale_icon,
+        "material": material,
+
 
     })
 
