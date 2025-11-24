@@ -1,5 +1,6 @@
 # ============================================================
-#  BİYOMİMİKRİ DRENAJ SİSTEMİ — TÜBİTAK V6.0 (Final API)
+#  BİYOMİMİKRİ DRENAJ SİSTEMİ — TÜBİTAK V6.0
+#  Son formüle göre güncellenmiş API
 # ============================================================
 
 from flask import Flask, request, jsonify
@@ -11,9 +12,10 @@ from collections import Counter
 app = Flask(__name__)
 CORS(app)
 
-# ------------------------------------------------------------
-# Yardımcı Fonksiyonlar
-# ------------------------------------------------------------
+
+# ============================================================
+#  YARDIMCI FONKSİYONLAR
+# ============================================================
 
 def clamp(v, vmin=0.0, vmax=1.0):
     return max(vmin, min(vmax, v))
@@ -21,9 +23,10 @@ def clamp(v, vmin=0.0, vmax=1.0):
 def safe(v, default=None):
     return v if (v is not None and v == v) else default
 
-# ------------------------------------------------------------
-# Eğim Hesabı (Open-Meteo + OpenElevation fallback)
-# ------------------------------------------------------------
+
+# ============================================================
+#  DEM → EĞİM (Open-Meteo + OpenElevation Failover)
+# ============================================================
 
 def get_elev_openmeteo(lat, lon):
     url = f"https://api.open-meteo.com/v1/elevation?latitude={lat}&longitude={lon}"
@@ -41,34 +44,41 @@ def get_elevation(lat, lon):
     errors = []
     try:
         return get_elev_openmeteo(lat, lon), None
-    except:
+    except Exception:
         errors.append("Open-Meteo başarısız.")
-
     try:
         return get_elev_openelev(lat, lon), None
-    except:
+    except Exception:
         errors.append("Open-Elevation başarısız.")
-
-    return None, " / ".join(errors)
+    return None, " / ".join(errors) if errors else "DEM kaynağı hatası"
 
 def estimate_slope_percent(lat, lon):
+    """
+    ~100 m kuzeye gidip yükseklik farkından eğimi hesaplıyoruz.
+    Eğim % cinsinden.
+    """
     h1, err = get_elevation(lat, lon)
     if h1 is None:
         return None, err
 
-    delta = 100 / 111320.0
-    h2, err2 = get_elevation(lat + delta, lon)
+    delta_deg = 100.0 / 111320.0  # ~100 m enlem farkı
+    h2, err2 = get_elevation(lat + delta_deg, lon)
     if h2 is None:
         return None, err2
 
-    slope = abs(h2 - h1)
-    return slope, None
+    dh = h2 - h1
+    slope_percent = abs(dh)  # 100 m’ye bölünmüş olduğu için ~% olarak alıyoruz
+    return slope_percent, None
 
-# ------------------------------------------------------------
-# 10 Yıllık Yağış Verisi — Open-Meteo Archive
-# ------------------------------------------------------------
+
+# ============================================================
+#  YAĞIŞ (10 YIL) — Open-Meteo Archive
+# ============================================================
 
 def fetch_precip(lat, lon):
+    """
+    2015-01-01 – 2024-12-31 arası günlük toplam yağış
+    """
     try:
         url = (
             "https://archive-api.open-meteo.com/v1/archive?"
@@ -76,90 +86,97 @@ def fetch_precip(lat, lon):
             "&start_date=2015-01-01&end_date=2024-12-31"
             "&daily=precipitation_sum&timezone=UTC"
         )
-        r = requests.get(url, timeout=20)
+        r = requests.get(url, timeout=25)
         r.raise_for_status()
-        arr = r.json()["daily"]["precipitation_sum"]
+        daily = r.json()["daily"]["precipitation_sum"]
+        if not daily:
+            return None, None, None, "Yağış verisi boş geldi"
 
-        total = sum(arr)
-        meanA = total / 10
-        maxD = max(arr)
-        p99 = sorted(arr)[int(len(arr) * 0.99)]
+        total = sum(daily)
+        meanA = total / 10.0
+        maxD = max(daily)
+        sorted_p = sorted(daily)
+        p99_index = int(0.99 * len(sorted_p))
+        p99 = sorted_p[p99_index]
 
         return meanA, maxD, p99, None
-    except:
+    except Exception:
         return None, None, None, "Yağış API hatası"
 
 def compute_idf_intensity(max_daily):
+    """
+    Basit IDF yaklaşımı: 27 dakikalık kısa süreli şiddete indirgeme.
+    max_daily mm/gün --> mm/saat civarı
+    """
     if not max_daily:
-        return 0
-    return (max_daily * 1.3) / ((15 + 12)**0.75)
+        return 0.0
+    return (max_daily * 1.3) / ((15 + 12) ** 0.75)
 
 
-
-# ------------------------------------------------------------
-# OSM — Yapılar + Landuse
-# ------------------------------------------------------------
+# ============================================================
+#  OSM: Binalar + Arazi Kullanımı
+# ============================================================
 
 def fetch_osm(lat, lon, radius=200):
-
+    """
+    radius m yarıçaplı alanda building ve landuse etiketleri
+    """
     query = f"""
-    [out:json][timeout:60];
+    [out:json][timeout:25];
     (
       nwr(around:{radius},{lat},{lon})["building"];
       nwr(around:{radius},{lat},{lon})["landuse"];
     );
     out tags;
     """
+    try:
+        r = requests.post("https://overpass-api.de/api/interpreter",
+                          data={"data": query}, timeout=30)
+        r.raise_for_status()
+        elements = r.json().get("elements", [])
+    except Exception:
+        return 0, [], "OSM API hatası"
 
-    urls = [
-        "https://overpass-api.de/api/interpreter",
-        "https://overpass.kumi.systems/api/interpreter"
-    ]
+    buildings = 0
+    lands = []
+    for el in elements:
+        tags = el.get("tags", {})
+        if "building" in tags:
+            buildings += 1
+        if "landuse" in tags:
+            lands.append(tags["landuse"])
 
-    for url in urls:
-        for _ in range(3):
-            try:
-                r = requests.post(url, data={"data": query}, timeout=30)
-                r.raise_for_status()
-                data = r.json().get("elements", [])
-
-                buildings = 0
-                lands = []
-
-                for el in data:
-                    tags = el.get("tags", {})
-                    if "building" in tags:
-                        buildings += 1
-                    if "landuse" in tags:
-                        lands.append(tags["landuse"])
-
-                return buildings, lands, None
-            except:
-                pass
-
-    return 0, [], "OSM API tüm denemelerde başarısız"
+    return buildings, lands, None
 
 
+# ============================================================
+#  YOĞUNLUK NORMALİZASYONU (Türkiye Kalibrasyonu)
+# ============================================================
 
-# ------------------------------------------------------------
-# Yoğunluk — Türkiye Kalibrasyonu
-# ------------------------------------------------------------
+def normalize_density_turkey(dens_bld_per_km2):
+    """
+    500 bina/km²: düşük (0)
+    5000 bina/km²: çok yüksek (1)
+    Arası lineer.
+    """
+    low = 500.0
+    high = 5000.0
+    if dens_bld_per_km2 <= low:
+        return 0.0
+    if dens_bld_per_km2 >= high:
+        return 1.0
+    return (dens_bld_per_km2 - low) / (high - low)
 
-def normalize_density_turkey(dens):
-    low = 300
-    high = 3000
-    if dens <= low:
-        return 0
-    if dens >= high:
-        return 1
-    return (dens - low) / (high - low)
 
-
-# ------------------------------------------------------------
-# Landuse → Geçirgenlik
-# ------------------------------------------------------------
+# ============================================================
+#  GEÇİRGENLİK: Landuse → K
+# ============================================================
 
 def permeability_from_landuse(lands):
+    """
+    Arazi kullanımına göre yaklaşık geçirgenlik.
+    Değerler DSİ/YTDDSHY'deki C aralıklarının tersine göre ayarlandı.
+    """
     if not lands:
         return 0.5
     mc = Counter(lands).most_common(1)[0][0]
@@ -167,104 +184,117 @@ def permeability_from_landuse(lands):
         "forest": 0.85,
         "meadow": 0.80,
         "grass": 0.80,
-        "greenfield": 0.70,
+        "greenfield": 0.75,
         "farmland": 0.60,
-        "orchard": 0.55,
+        "orchard": 0.60,
         "residential": 0.35,
         "commercial": 0.30,
         "industrial": 0.25
     }
-    return table.get(mc, 0.50)
+    return table.get(mc, 0.5)
 
 
-# ------------------------------------------------------------
-# OSM Roads → Havza Alanı
-# ------------------------------------------------------------
+# ============================================================
+#  OSM ROADS → DİNAMİK HAVZA ALANI (A_m2)
+# ============================================================
 
 def fetch_osm_roads(lat, lon, radius=200):
-
+    """
+    radius m yarıçaplı alanda highway objelerinin toplam uzunluğu
+    """
     query = f"""
-    [out:json][timeout:60];
-    way(around:{radius},{lat},{lon})["highway"];
+    [out:json][timeout:25];
+    (
+      way(around:{radius},{lat},{lon})["highway"];
+    );
     out geom;
     """
+    try:
+        r = requests.post("https://overpass-api.de/api/interpreter",
+                          data={"data": query}, timeout=30)
+        r.raise_for_status()
+        elements = r.json().get("elements", [])
+    except Exception:
+        return 0.0, "Roads API hatası"
 
-    urls = [
-        "https://overpass-api.de/api/interpreter",
-        "https://overpass.kumi.systems/api/interpreter"
-    ]
+    total_len = 0.0
+    for el in elements:
+        geom = el.get("geometry", [])
+        for i in range(len(geom) - 1):
+            lat1, lon1 = geom[i]["lat"], geom[i]["lon"]
+            lat2, lon2 = geom[i + 1]["lat"], geom[i + 1]["lon"]
 
-    for url in urls:
-        for _ in range(3):
-            try:
-                r = requests.post(url, data={"data": query}, timeout=30)
-                r.raise_for_status()
-                elements = r.json().get("elements", [])
+            dx = (lon2 - lon1) * 85000.0
+            dy = (lat2 - lat1) * 111320.0
+            total_len += math.hypot(dx, dy)
 
-                total_len = 0.0
-
-                for el in elements:
-                    geom = el.get("geometry", [])
-                    for i in range(len(geom) - 1):
-                        lat1, lon1 = geom[i]["lat"], geom[i]["lon"]
-                        lat2, lon2 = geom[i+1]["lat"], geom[i+1]["lon"]
-
-                        dx = (lon2 - lon1) * 85000
-                        dy = (lat2 - lat1) * 111320
-                        total_len += math.sqrt(dx*dx + dy*dy)
-
-                return total_len, None
-
-            except:
-                pass
-
-    return 0, "Roads API tüm denemelerde başarısız"
+    return total_len, None
 
 
 def estimate_catchment_area(total_road_m, D, K):
+    """
+    Yol uzunluğuna, yoğunluğa ve geçirgenliğe göre etkili havza alanı.
+    """
     if total_road_m <= 0:
-        return 30000
+        return 30000.0  # ~3 ha varsayılan
 
-    A_roads = total_road_m * 10 * 1.25
-    A_density = A_roads * (1 + 0.55 * D)
-    A_final = A_density * (1 + 0.45*(1-K))
+    W_avg = 10.0  # ortalama yol genişliği
+    A_roads = total_road_m * W_avg * 1.3          # yol yüzeyi
+    A_density = A_roads * (1.0 + 0.6 * D)        # bina yoğunluğu çarpanı
+    A_final = A_density * (1.0 + 0.5 * (1.0 - K))  # geçirimsizlik çarpanı
     return A_final
 
 
-# ------------------------------------------------------------
-# Yeni Sel Riski v3.0
-# ------------------------------------------------------------
+# ============================================================
+#  SEL RİSKİ BLOKLARI (SON FORMÜL)
+# ============================================================
 
-def compute_risks_advanced(S, D, K, Wstar, Rext):
+def compute_blocks(S, D, K, W_star, R_extreme):
+    """
+    Son risk formülündeki blokların hesaplanması:
+    - W_block
+    - C (kentsel)
+    - S_flat
+    - FloodRisk
+    """
+    # Kentsel etki
+    C = 0.5 * D + 0.5 * (1.0 - K)
 
-    C = 0.45*D + 0.55*(1-K)
+    # Yağış bloğu
+    W_block = 0.6 * W_star + 0.4 * R_extreme
 
-    W_eff = Wstar * C
+    # Düzlük (düşük eğim) etkisi
+    S_flat = 1.0 - S
 
-    S_risk = clamp(4 * (S - 0.5)**2)
+    # Nihai sel riski (0–1)
+    FloodRisk = 0.40 * W_block + 0.35 * C + 0.25 * S_flat
 
-    B = clamp(0.65*C + 0.35*K*(1-S))
-
-    Flood = clamp(
-        0.32 * W_eff +
-        0.26 * Rext +
-        0.22 * B +
-        0.12 * C +
-        0.08 * S_risk
-    )
-
-    return C, W_eff, B, S_risk, Flood
+    return C, W_block, S_flat, FloodRisk
 
 
-# ------------------------------------------------------------
-# AHP Sistem Seçimi
-# ------------------------------------------------------------
+# ============================================================
+#  AHP DRENAJ TİPİ SEÇİMİ (SON KATSAYILAR)
+# ============================================================
 
-def choose_system(S, D, K, C, W_eff, B, S_risk, Flood):
-    Score_DEN = 0.45*S + 0.30*W_eff + 0.25*(1-K)
-    Score_PAR = 0.45*(1-S) + 0.30*K + 0.25*(1-Flood)
-    Score_RET = 0.50*D + 0.30*(1-K) + 0.20*W_eff
-    Score_HYB = 0.40*(1 - abs(2*S - 1)) + 0.35*Flood + 0.25*(1-K)
+def choose_system(S, D, K, C, FloodRisk):
+    """
+    Dendritik / Paralel / Retiküler / Hibrit skorları
+    """
+
+    # Orta eğimi vurgulayan terim
+    S_mid = 1.0 - abs(2.0 * S - 1.0)
+
+    # Dendritik: eğim + risk + geçirimsizlik
+    Score_DEN = 0.50 * S + 0.30 * FloodRisk + 0.20 * (1.0 - K)
+
+    # Paralel: düşük eğim + geçirgenlik + düşük risk
+    Score_PAR = 0.45 * (1.0 - S) + 0.30 * K + 0.25 * (1.0 - FloodRisk)
+
+    # Retiküler: yoğunluk + kentsel etki + risk
+    Score_RET = 0.50 * D + 0.30 * C + 0.20 * FloodRisk
+
+    # Hibrit: orta eğim + risk + kentsel etki
+    Score_HYB = 0.35 * FloodRisk + 0.35 * C + 0.30 * S_mid
 
     scores = {
         "dendritic": Score_DEN,
@@ -274,36 +304,49 @@ def choose_system(S, D, K, C, W_eff, B, S_risk, Flood):
     }
 
     selected = max(scores, key=scores.get)
-    return selected, scores
+    return selected, scores, S_mid
 
 
-# ------------------------------------------------------------
-# Manning Boru Çapı
-# ------------------------------------------------------------
+# ============================================================
+#  MANNING BORU ÇAPI
+# ============================================================
 
-def manning_diameter(Q, n, S):
-    if Q <= 0 or S <= 0:
-        return 0
-    return ((4**(5/3) * n * Q) / (math.pi * math.sqrt(S)))**(3/8)
+def manning_diameter(Q, n, S_bed):
+    """
+    D = ((4^(5/3) * n * Q) / (pi * sqrt(S)))^(3/8)
+    """
+    if Q <= 0 or S_bed <= 0:
+        return 0.0
+    num = (4.0 ** (5.0 / 3.0)) * n * Q
+    den = math.pi * math.sqrt(S_bed)
+    return (num / den) ** (3.0 / 8.0)
 
 
-# ------------------------------------------------------------
-# Boru Kategorisi
-# ------------------------------------------------------------
+# ============================================================
+#  ÖLÇEK / MALZEME SINIFLANDIRMASI
+# ============================================================
 
 def classify_scale(D_mm, Q, A_m2):
+    """
+    Basit mühendislik ölçek sınıflandırması
+    """
     A_ha = A_m2 / 10000.0
 
+    # Street Drain
     if D_mm < 500 and Q < 1.5 and A_ha < 3:
         return "Sokak Hattı", "🟩"
 
+    # Secondary Collector
     if (500 <= D_mm < 1000) or (1.5 <= Q < 5) or (3 <= A_ha < 10):
         return "Mahalle Kolektörü", "🟨"
 
+    # Major Trunk
     return "Ana Kolektör / Trunk", "🟥"
 
-
 def recommend_material(D_mm, velocity, Q):
+    """
+    Çapa göre kabaca malzeme önerisi.
+    """
     if D_mm >= 1200:
         return "GRP (Cam Elyaf Takviyeli Polyester)"
     if 600 <= D_mm < 1200:
@@ -313,115 +356,134 @@ def recommend_material(D_mm, velocity, Q):
     return "PVC veya PP"
 
 
-# ------------------------------------------------------------
-# Açıklama Motoru
-# ------------------------------------------------------------
-
-def explanation_text(selected, S, D, K, Flood):
-
-    parts = []
-
-    if S > 0.5:
-        parts.append("Eğim yüksek olduğu için su doğal olarak dallanarak akar, bu nedenle dendritik yapı avantaj sağlar.")
-    else:
-        parts.append("Eğim düşük olduğu için akış doğrusal davranır, bu da paralel hatları daha verimli kılar.")
-
-    if D > 0.6:
-        parts.append("Bina yoğunluğu yüksek olduğu için retiküler ağ tipi sistem güçlü bir alternatifti.")
-    else:
-        parts.append("Yoğunluk düşük olduğundan geniş ağ yapısına gerek duyulmadı.")
-
-    if K < 0.4:
-        parts.append("Yer geçirgenliği düşük olduğundan yüzey akışı artıyor, bu da sistemin daha güçlü olması gerektiğini gösteriyor.")
-
-    if Flood > 0.6:
-        parts.append("Sel riski yüksek olduğu için kapasitesi büyük borular tercih edilmelidir.")
-
-    final = f"Bu bölgede **{selected.upper()}** sistemi seçilmiştir. " + " ".join(parts)
-    return final
-
-
-# ------------------------------------------------------------
-# API Endpoint
-# ------------------------------------------------------------
+# ============================================================
+#  ANA API ENDPOINT
+# ============================================================
 
 @app.route("/analyze", methods=["POST"])
 def analyze():
-    data = request.get_json()
+    data = request.get_json(force=True)
+
     lat = float(data["lat"])
     lon = float(data["lon"])
 
-    # Eğim
+    # --------------------------------------------------------
+    # 1) EĞİM
+    # --------------------------------------------------------
     slope_percent, dem_error = estimate_slope_percent(lat, lon)
-    S = clamp((slope_percent / 30)) if slope_percent else 0.0
-    S_bed = max(0.003, min((slope_percent or 0)/100.0, 0.03))
+    if slope_percent is None:
+        slope_percent = 0.0
 
-    # Yağış
+    # Eğim skoru S (0–1, 30% üstü doyuyor)
+    S = clamp(slope_percent / 30.0)
+
+    # Manning için taban eğimi (m/m) – 0.3% ile 3% arasına sıkıştır
+    raw_bed_slope = (slope_percent or 0.0) / 100.0
+    S_bed = max(0.003, min(raw_bed_slope, 0.03))
+
+    # --------------------------------------------------------
+    # 2) YAĞIŞ
+    # --------------------------------------------------------
     meanA, maxD, p99, rain_error = fetch_precip(lat, lon)
-    Wstar = clamp(meanA / 1000) if meanA else 0.5
-    Rext = clamp(0.6*(safe(maxD,0)/150) + 0.4*(safe(p99,0)/80))
 
-    # OSM — Bina + Landuse
+    if meanA is None:
+        W_star = 0.5
+    else:
+        W_star = clamp(meanA / 1000.0)  # 1000 mm/yıl ve üzeri doyum
+
+    if maxD is None or p99 is None:
+        R_extreme = 0.5
+    else:
+        R_extreme = clamp(0.6 * (maxD / 150.0) + 0.4 * (p99 / 80.0))
+
+    # --------------------------------------------------------
+    # 3) OSM BİNA & LANDUSE
+    # --------------------------------------------------------
     bcount, lands, osm_error = fetch_osm(lat, lon)
-    area_km2 = math.pi * (0.2**2)
-    dens_km2 = bcount / area_km2 if area_km2 > 0 else 0
+    area_km2 = math.pi * (0.2 ** 2)  # 200 m yarıçaplı daire
+    dens_km2 = bcount / area_km2 if area_km2 > 0 else 0.0
     D = normalize_density_turkey(dens_km2)
     K = clamp(permeability_from_landuse(lands))
 
-    # OSM — Roads → Havza Alanı
+    # --------------------------------------------------------
+    # 4) ROADS → HAVZA ALANI
+    # --------------------------------------------------------
     road_len, roads_error = fetch_osm_roads(lat, lon)
     A_m2 = estimate_catchment_area(road_len, D, K)
+    A_ha = A_m2 / 10000.0
 
-    # Yeni Sel Riski
-    C, W_eff, B, S_risk, Flood = compute_risks_advanced(S, D, K, Wstar, Rext)
+    # --------------------------------------------------------
+    # 5) RİSK BLOKLARI ve FLOODRISK
+    # --------------------------------------------------------
+    C, W_block, S_flat, FloodRisk = compute_blocks(S, D, K, W_star, R_extreme)
 
-    # Sistem seçimi
-    selected, scores = choose_system(S, D, K, C, W_eff, B, S_risk, Flood)
+    # --------------------------------------------------------
+    # 6) SİSTEM SEÇİMİ (AHP)
+    # --------------------------------------------------------
+    selected, scores, S_mid = choose_system(S, D, K, C, FloodRisk)
 
-    # Hidrolik
-    i_mm_h = compute_idf_intensity(maxD)
-    A_ha = A_m2 / 10000
+    # --------------------------------------------------------
+    # 7) HİDROLİK (Q, D_mm, hız)
+    # --------------------------------------------------------
+    i_mm_h = compute_idf_intensity(maxD) if maxD is not None else 0.0
     Q = 0.278 * C * i_mm_h * A_ha
-    D_mm = manning_diameter(Q, 0.013, S_bed) * 1000
-    velocity = (Q / (math.pi*(D_mm/1000)**2/4)) if D_mm > 0 else 0
+    D_m = manning_diameter(Q, n=0.013, S_bed=S_bed)
+    D_mm = D_m * 1000.0
+    area_pipe = math.pi * (D_m ** 2) / 4.0 if D_m > 0 else 0.0
+    velocity = Q / area_pipe if area_pipe > 0 else 0.0
 
     scale_name, scale_icon = classify_scale(D_mm, Q, A_m2)
     material = recommend_material(D_mm, velocity, Q)
 
-    explanation = explanation_text(selected, S, D, K, Flood)
+    # --------------------------------------------------------
+    # 8) FLOODRISK SEVİYE METNİ
+    # --------------------------------------------------------
+    if FloodRisk < 0.3:
+        FloodRiskLevel = "Düşük"
+    elif FloodRisk < 0.6:
+        FloodRiskLevel = "Orta"
+    elif FloodRisk < 0.8:
+        FloodRiskLevel = "Yüksek"
+    else:
+        FloodRiskLevel = "Çok Yüksek"
 
+    # --------------------------------------------------------
+    # 9) JSON ÇIKTI
+    # --------------------------------------------------------
     return jsonify({
         "selected_system": selected,
         "scores": scores,
+
         "slope_percent": slope_percent,
         "S": S,
+        "S_flat": S_flat,
+        "S_mid": S_mid,
+
         "building_count": bcount,
         "density_bld_per_km2": dens_km2,
         "D": D,
         "lands": lands,
         "K": K,
-        "W_star": Wstar,
-        "R_extreme": Rext,
+
+        "W_star": W_star,
+        "R_extreme": R_extreme,
+        "W_block": W_block,
+
         "C": C,
-        "W_eff": W_eff,
-        "B": B,
-        "S_risk": S_risk,
-        "FloodRisk": Flood,
-        "FloodRiskLevel": (
-            "Düşük" if Flood < 0.3 else
-            "Orta" if Flood < 0.6 else
-            "Yüksek" if Flood < 0.8 else
-            "Çok Yüksek"
-        ),
+        "FloodRisk": FloodRisk,
+        "FloodRiskLevel": FloodRiskLevel,
+
         "road_length_m": road_len,
         "catchment_area_m2": A_m2,
+
         "Q_m3_s": Q,
         "pipe_diameter_mm": D_mm,
         "velocity_m_s": velocity,
+
         "scale_name": scale_name,
         "scale_icon": scale_icon,
         "material": material,
-        "explanation": explanation,
+
         "dem_error": dem_error,
         "rain_error": rain_error,
         "osm_error": osm_error,
@@ -431,89 +493,11 @@ def analyze():
 
 @app.route("/")
 def home():
-    return "Drenaj API v6.1 — BioFlow API"
+    return "Drenaj API v6.0 — Biyomimikri + AHP + Manning (Son formül)"
 
-@app.route("/manual", methods=["POST"])
-def manual():
-    data = request.get_json()
 
-    # ZORUNLU inputlar
-    slope_percent = float(data.get("slope_percent", 0))
-    bcount = float(data.get("building_count", 0))
-    dens_km2 = float(data.get("dens_km2", 0))
-    lands = data.get("landuse", [])
-    meanA = float(data.get("meanA", 0))
-    maxD = float(data.get("maxD", 0))
-    p99 = float(data.get("p99", 0))
-    road_len = float(data.get("road_length_m", 0))
+if __name__ == "__main__":
+    app.run()
 
-    # Normalize eğim
-    S = clamp(slope_percent / 30)    
-
-    # Manning taban eğimi
-    raw_bed_slope = slope_percent / 100
-    S_bed = max(0.003, min(raw_bed_slope, 0.03))
-
-    # Yoğunluk skoru
-    D = normalize_density_turkey(dens_km2)
-
-    # Geçirgenlik
-    K = clamp(permeability_from_landuse(lands))
-
-    # Yağış skorları
-    Wstar = clamp(meanA / 1000)
-    Rext = clamp(0.6*(maxD/150) + 0.4*(p99/80))
-
-    # Havza alanı
-    A_m2 = estimate_catchment_area(road_len, D, K)
-
-    # Risk hesapları
-    C, W_eff, B, L, Flood = compute_risks(S, D, K, Wstar, Rext)
-
-    # Sistem seçimi
-    selected, scores = choose_system(S, D, K, C, W_eff, B, L, Flood)
-
-    # Hidrolik hesap
-    i_mm_h = compute_idf_intensity(maxD)
-    A_ha = A_m2 / 10000
-    Q = 0.278 * C * i_mm_h * A_ha
-    D_mm = manning_diameter(Q, 0.013, S_bed) * 1000
-    velocity = (Q / (math.pi*(D_mm/1000)**2/4)) if D_mm > 0 else 0
-
-    scale_name, scale_icon = classify_scale(D_mm, Q, A_m2)
-    material = recommend_material(D_mm, velocity, Q)
-
-    return jsonify({
-        "selected_system": selected,
-        "scores": scores,
-        "S": S,
-        "slope_percent": slope_percent,
-        "building_count": bcount,
-        "density_bld_per_km2": dens_km2,
-        "D": D,
-        "lands": lands,
-        "K": K,
-        "W_star": Wstar,
-        "R_extreme": Rext,
-        "C": C,
-        "W_eff": W_eff,
-        "B": B,
-        "L": L,
-        "FloodRisk": Flood,
-        "FloodRiskLevel": (
-            "Düşük" if Flood < 0.3 else
-            "Orta" if Flood < 0.6 else
-            "Yüksek" if Flood < 0.8 else
-            "Çok Yüksek"
-        ),
-        "catchment_area_m2": A_m2,
-        "road_length_m": road_len,
-        "Q_m3_s": Q,
-        "pipe_diameter_mm": D_mm,
-        "velocity_m_s": velocity,
-        "scale_name": scale_name,
-        "scale_icon": scale_icon,
-        "material": material
-    })
-
+# Render / gunicorn için:
 application = app
