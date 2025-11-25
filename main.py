@@ -250,26 +250,20 @@ def estimate_catchment_area(total_road_m, D, K):
 # ============================================================
 
 def compute_blocks(S, D, K, W_star, R_extreme):
-    """
-    Son risk formülündeki blokların hesaplanması:
-    - W_block
-    - C (kentsel)
-    - S_flat
-    - FloodRisk
-    """
     # Kentsel etki
     C = 0.5 * D + 0.5 * (1.0 - K)
 
-    # Yağış bloğu
-    W_block = 0.6 * W_star + 0.4 * R_extreme
+    # Yağış bloğu (biraz yumuşatılmış)
+    W_block = 0.5 * W_star + 0.5 * (R_extreme ** 1.3)
 
-    # Düzlük (düşük eğim) etkisi
+    # Düzlük etkisi
     S_flat = 1.0 - S
 
-    # Nihai sel riski (0–1)
-    FloodRisk = 0.40 * W_block + 0.35 * C + 0.25 * S_flat
+    # Nihai sel riski
+    FloodRisk = 0.45 * W_block + 0.40 * C + 0.15 * S_flat
 
     return C, W_block, S_flat, FloodRisk
+
 
 
 # ============================================================
@@ -438,14 +432,15 @@ def analyze():
     # --------------------------------------------------------
     # 8) FLOODRISK SEVİYE METNİ
     # --------------------------------------------------------
-    if FloodRisk < 0.3:
-        FloodRiskLevel = "Düşük"
-    elif FloodRisk < 0.6:
-        FloodRiskLevel = "Orta"
-    elif FloodRisk < 0.8:
-        FloodRiskLevel = "Yüksek"
-    else:
-        FloodRiskLevel = "Çok Yüksek"
+if FloodRisk < 0.4:
+    FloodRiskLevel = "Düşük"
+elif FloodRisk < 0.65:
+    FloodRiskLevel = "Orta"
+elif FloodRisk < 0.85:
+    FloodRiskLevel = "Yüksek"
+else:
+    FloodRiskLevel = "Çok Yüksek"
+
 
     # --------------------------------------------------------
     # 9) JSON ÇIKTI
