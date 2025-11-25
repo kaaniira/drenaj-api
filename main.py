@@ -119,16 +119,7 @@ def compute_idf_intensity(max_daily):
 # ============================================================
 
 # 3) HİBRİT BİNA YOĞUNLUĞU
-GOOGLE_KEY = "AIzaSyD8FfIgSed-rL6vU9RGaKw8Z8iotckRJRQ"
 
-bcount, b_err = hybrid_building_count(lat, lon, radius=200, google_key=GOOGLE_KEY)
-dens_km2 = density_per_km2(bcount, 200)
-D = normalize_D(dens_km2)
-
-# Geçirgenlik (daha önceki sistem aynı kalıyor)
-K = clamp(permeability_from_landuse(lands))  # Copernicus raster yakında eklenebilir
-
-building_count = bcount
 
 # ============================================================
 #  YOĞUNLUK NORMALİZASYONU (Türkiye Kalibrasyonu)
@@ -361,6 +352,23 @@ def analyze():
     slope_percent, dem_error = estimate_slope_percent(lat, lon)
     if slope_percent is None:
         slope_percent = 0.0
+
+        
+    GOOGLE_KEY = "AIzaSyD8FfIgSed-rL6vU9RGaKw8Z8iotckRJRQ"
+
+    bcount, b_err = hybrid_building_count(lat, lon, radius=200, google_key=GOOGLE_KEY)
+    dens_km2 = density_per_km2(bcount, 200)
+    D = normalize_D(dens_km2)
+    
+    # Geçirgenlik (daha önceki sistem aynı kalıyor)
+    K = clamp(permeability_from_landuse(lands))  # Copernicus raster yakında eklenebilir
+    
+    building_count = bcount
+
+
+
+
+    
 
     # Eğim skoru S (0–1, 30% üstü doyuyor)
     S = clamp(slope_percent / 30.0)
