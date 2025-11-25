@@ -452,7 +452,7 @@ def analyze():
     elif FloodRisk < 0.55:
         FloodRiskLevel = "Orta"
     elif FloodRisk < 0.70:
-        FloodRiskLevel = "Yüksek
+        FloodRiskLevel = "Yüksek"
     else:
         FloodRiskLevel = "Çok Yüksek"
 
