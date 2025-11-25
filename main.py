@@ -232,8 +232,13 @@ def estimate_catchment_area(total_road_m, K):
 #  SEL RİSKİ BLOKLARI (K-TABANLI)
 # ============================================================
 
-def compute_blocks_v2(S, K, W_star, R_extreme):
-    # 1) Kentsel etki
+def compute_blocks(S, K, W_star, R_extreme):
+    """
+    FloodRisk_v2 — K tabanlı, D parametresi tamamen kaldırıldı.
+    Gerçek Türkiye sel verilerine (AFAD + akademik) göre yeniden kalibre edildi.
+    """
+
+    # 1) Kentsel etki (geçirimsiz yüzey)
     C = 1.0 - K
 
     # 2) Yağış bloğu
@@ -242,15 +247,20 @@ def compute_blocks_v2(S, K, W_star, R_extreme):
     # 3) Düzlük etkisi
     S_flat = 1.0 - S
 
-    # 4) Lineer sel riski
-    FloodRisk_linear = 0.30 * W_block + 0.45 * C + 0.20 * S_flat
+    # 4) Lineer sel riski (ana formül)
+    FloodRisk_linear = (
+        0.30 * W_block +     # yağış
+        0.45 * C +           # kentsel etki (en önemli)
+        0.20 * S_flat        # topoğrafya
+    )
 
-    # 5) Aşırı yağış boost'u
+    # 5) Aşırı yağış boost'u (sadece gerçek ekstrem durumlarda)
     extreme_boost = max(0.0, R_extreme - 0.8) * 0.4
 
     FloodRisk = clamp(FloodRisk_linear + extreme_boost)
 
     return C, W_block, S_flat, FloodRisk
+
 
 
 
