@@ -1,9 +1,8 @@
 # ============================================================
-#  BİYOMİMİKRİ DRENAJ SİSTEMİ — TÜBİTAK V6.0
-#  Son formüle göre güncellenmiş API
+#  BİYOMİMİKRİ DRENAJ SİSTEMİ — TÜBİTAK v7.0 (K-TABANLI)
+#  D (bina yoğunluğu) tamamen çıkarıldı, sadece K + yağış + eğim
 # ============================================================
 
-from buildings_hybrid import hybrid_building_count, density_per_km2, normalize_D
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import requests
@@ -115,13 +114,13 @@ def compute_idf_intensity(max_daily):
 
 
 # ============================================================
-#  OSM: Binalar + Arazi Kullanımı
+#  OSM: Binalar + Arazi Kullanımı (Sadece K için kullanılıyor)
 # ============================================================
+
 def fetch_osm(lat, lon, radius=200):
     """
     radius m yarıçaplı alanda building ve landuse etiketleri
-    (bina sayısı hibritten geldiği için burada bina sayısını
-     sadece landuse ile birlikte yardımcı bilgi olarak kullanıyoruz.)
+    (bina sayısı modelden çıkarıldı; sadece lands → K için kullanıyoruz.)
     """
     query = f"""
     [out:json][timeout:25];
@@ -150,27 +149,10 @@ def fetch_osm(lat, lon, radius=200):
 
     return buildings, lands, None
 
-# ============================================================
-#  YOĞUNLUK NORMALİZASYONU (Türkiye Kalibrasyonu)
-# ============================================================
-
-def normalize_density_turkey(dens_bld_per_km2):
-    """
-    500 bina/km²: düşük (0)
-    5000 bina/km²: çok yüksek (1)
-    Arası lineer.
-    """
-    low = 500.0
-    high = 5000.0
-    if dens_bld_per_km2 <= low:
-        return 0.0
-    if dens_bld_per_km2 >= high:
-        return 1.0
-    return (dens_bld_per_km2 - low) / (high - low)
-
 
 # ============================================================
 #  GEÇİRGENLİK: Landuse → K
+#  (İleride Copernicus IMD ile değiştirilebilir)
 # ============================================================
 
 def permeability_from_landuse(lands):
@@ -232,34 +214,33 @@ def fetch_osm_roads(lat, lon, radius=200):
     return total_len, None
 
 
-def estimate_catchment_area(total_road_m, D, K):
+def estimate_catchment_area(total_road_m, K):
     """
-    Yol uzunluğuna, yoğunluğa ve geçirgenliğe göre etkili havza alanı.
+    Yol uzunluğuna ve geçirgenliğe göre etkili havza alanı.
+    D (bina yoğunluğu) modelden çıkarıldı.
     """
     if total_road_m <= 0:
         return 30000.0  # ~3 ha varsayılan
 
     W_avg = 10.0  # ortalama yol genişliği
-    A_roads = total_road_m * W_avg * 1.3          # yol yüzeyi
-    A_density = A_roads * (1.0 + 0.6 * D)        # bina yoğunluğu çarpanı
-    A_final = A_density * (1.0 + 0.5 * (1.0 - K))  # geçirimsizlik çarpanı
+    A_roads = total_road_m * W_avg * 1.3           # yol yüzeyi
+    A_final = A_roads * (1.0 + 0.5 * (1.0 - K))    # geçirimsizlik çarpanı
     return A_final
 
 
 # ============================================================
-#  SEL RİSKİ BLOKLARI (SON FORMÜL)
+#  SEL RİSKİ BLOKLARI (K-TABANLI)
 # ============================================================
 
-def compute_blocks(S, D, K, W_star, R_extreme):
+def compute_blocks(S, K, W_star, R_extreme):
     """
-    Son risk formülündeki blokların hesaplanması:
     - W_block
-    - C (kentsel)
+    - C (kentsel etki) = 1 - K
     - S_flat
     - FloodRisk (aşırı yağış boost'lu)
     """
-    # Kentsel etki (bina yoğunluğu + geçirimsizlik)
-    C = 0.5 * D + 0.5 * (1.0 - K)
+    # Kentsel etki: tamamen geçirgenlikten
+    C = 1.0 - K
 
     # Yağış bloğu (uzun dönem + aşırı yağış)
     W_block = 0.6 * W_star + 0.4 * R_extreme
@@ -268,25 +249,24 @@ def compute_blocks(S, D, K, W_star, R_extreme):
     S_flat = 1.0 - S
 
     # Lineer sel riski
-    FloodRisk_linear = 0.36*W_block + 0.34*C + 0.30*S_flat
+    FloodRisk_linear = 0.36 * W_block + 0.34 * C + 0.30 * S_flat
 
+    # Aşırı yağış boost'u
     extreme_boost = max(0.0, R_extreme - 0.7) * 0.5  # 0–0.15 arası
 
     FloodRisk = clamp(FloodRisk_linear + extreme_boost)
 
-
     return C, W_block, S_flat, FloodRisk
 
 
-
-
 # ============================================================
-#  AHP DRENAJ TİPİ SEÇİMİ (SON KATSAYILAR)
+#  AHP DRENAJ TİPİ SEÇİMİ (D'SİZ)
 # ============================================================
 
-def choose_system(S, D, K, C, FloodRisk):
+def choose_system(S, K, C, FloodRisk):
     """
     Dendritik / Paralel / Retiküler / Hibrit skorları
+    D (bina yoğunluğu) çıkarıldı.
     """
 
     # Orta eğimi vurgulayan terim
@@ -298,8 +278,8 @@ def choose_system(S, D, K, C, FloodRisk):
     # Paralel: düşük eğim + geçirgenlik + düşük risk
     Score_PAR = 0.45 * (1.0 - S) + 0.30 * K + 0.25 * (1.0 - FloodRisk)
 
-    # Retiküler: yoğunluk + kentsel etki + risk
-    Score_RET = 0.50 * D + 0.30 * C + 0.20 * FloodRisk
+    # Retiküler: kentsel etki + risk (D yok, C ve FloodRisk'in ağırlığı arttı)
+    Score_RET = 0.40 * C + 0.60 * FloodRisk
 
     # Hibrit: orta eğim + risk + kentsel etki
     Score_HYB = 0.35 * FloodRisk + 0.35 * C + 0.30 * S_mid
@@ -405,34 +385,27 @@ def analyze():
         R_extreme = clamp(0.6 * (maxD / 150.0) + 0.4 * (p99 / 80.0))
 
     # --------------------------------------------------------
-    # 3) HİBRİT BİNA YOĞUNLUĞU (OSM + Google Places)
+    # 3) OSM → LANDUSE → K
     # --------------------------------------------------------
-    GOOGLE_KEY = "BURAYA_OWN_KEY_YAZ"  # güvenlik için repo'da .env ile saklaman daha iyi
-
-    bcount, b_err = hybrid_building_count(lat, lon, radius=200, google_key=GOOGLE_KEY)
-    dens_km2 = density_per_km2(bcount, 200)
-    D = normalize_D(dens_km2)
-
-    # Landuse sadece geçirgenlik için OSM'den
-    osm_bld_dummy, lands, osm_error = fetch_osm(lat, lon)
+    bcount, lands, osm_error = fetch_osm(lat, lon)
     K = clamp(permeability_from_landuse(lands))
 
     # --------------------------------------------------------
     # 4) ROADS → HAVZA ALANI
     # --------------------------------------------------------
     road_len, roads_error = fetch_osm_roads(lat, lon)
-    A_m2 = estimate_catchment_area(road_len, D, K)
+    A_m2 = estimate_catchment_area(road_len, K)
     A_ha = A_m2 / 10000.0
 
     # --------------------------------------------------------
     # 5) RİSK BLOKLARI ve FLOODRISK
     # --------------------------------------------------------
-    C, W_block, S_flat, FloodRisk = compute_blocks(S, D, K, W_star, R_extreme)
+    C, W_block, S_flat, FloodRisk = compute_blocks(S, K, W_star, R_extreme)
 
     # --------------------------------------------------------
     # 6) SİSTEM SEÇİMİ (AHP)
     # --------------------------------------------------------
-    selected, scores, S_mid = choose_system(S, D, K, C, FloodRisk)
+    selected, scores, S_mid = choose_system(S, K, C, FloodRisk)
 
     # --------------------------------------------------------
     # 7) HİDROLİK (Q, D_mm, hız)
@@ -473,9 +446,8 @@ def analyze():
         "S_flat": S_flat,
         "S_mid": S_mid,
 
+        # Bina sayısı sadece bilgi amaçlı (modelde kullanılmıyor)
         "building_count": bcount,
-        "density_bld_per_km2": dens_km2,
-        "D": D,
         "lands": lands,
         "K": K,
 
@@ -500,14 +472,14 @@ def analyze():
 
         "dem_error": dem_error,
         "rain_error": rain_error,
-        "osm_error": osm_error if osm_error or b_err else None,
+        "osm_error": osm_error,
         "roads_error": roads_error
     })
 
 
 @app.route("/")
 def home():
-    return "Drenaj API v6.0 — Biyomimikri + AHP + Manning (Son formül)"
+    return "Drenaj API v7.0 — K tabanlı Biyomimikri + AHP + Manning"
 
 
 if __name__ == "__main__":
