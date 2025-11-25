@@ -428,13 +428,13 @@ def analyze():
     # --------------------------------------------------------
     # 8) FLOODRISK SEVİYE METNİ
     # --------------------------------------------------------
-    if FloodRisk < 0.25:
+    if FloodRisk < 0.20:
         FloodRiskLevel = "Çok Düşük"
     elif FloodRisk < 0.40:
         FloodRiskLevel = "Düşük"
-    elif FloodRisk < 0.55:
+    elif FloodRisk < 0.60:
         FloodRiskLevel = "Orta"
-    elif FloodRisk < 0.70:
+    elif FloodRisk < 0.75:
         FloodRiskLevel = "Yüksek"
     else:
         FloodRiskLevel = "Çok Yüksek"
