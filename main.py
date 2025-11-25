@@ -3,6 +3,7 @@
 #  Son formüle göre güncellenmiş API
 # ============================================================
 
+from buildings_hybrid import hybrid_building_count, density_per_km2, normalize_D
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import requests
@@ -117,37 +118,17 @@ def compute_idf_intensity(max_daily):
 #  OSM: Binalar + Arazi Kullanımı
 # ============================================================
 
-def fetch_osm(lat, lon, radius=200):
-    """
-    radius m yarıçaplı alanda building ve landuse etiketleri
-    """
-    query = f"""
-    [out:json][timeout:25];
-    (
-      nwr(around:{radius},{lat},{lon})["building"];
-      nwr(around:{radius},{lat},{lon})["landuse"];
-    );
-    out tags;
-    """
-    try:
-        r = requests.post("https://overpass-api.de/api/interpreter",
-                          data={"data": query}, timeout=30)
-        r.raise_for_status()
-        elements = r.json().get("elements", [])
-    except Exception:
-        return 0, [], "OSM API hatası"
+# 3) HİBRİT BİNA YOĞUNLUĞU
+GOOGLE_KEY = "AIzaSyD8FfIgSed-rL6vU9RGaKw8Z8iotckRJRQ"
 
-    buildings = 0
-    lands = []
-    for el in elements:
-        tags = el.get("tags", {})
-        if "building" in tags:
-            buildings += 1
-        if "landuse" in tags:
-            lands.append(tags["landuse"])
+bcount, b_err = hybrid_building_count(lat, lon, radius=200, google_key=GOOGLE_KEY)
+dens_km2 = density_per_km2(bcount, 200)
+D = normalize_D(dens_km2)
 
-    return buildings, lands, None
+# Geçirgenlik (daha önceki sistem aynı kalıyor)
+K = clamp(permeability_from_landuse(lands))  # Copernicus raster yakında eklenebilir
 
+building_count = bcount
 
 # ============================================================
 #  YOĞUNLUK NORMALİZASYONU (Türkiye Kalibrasyonu)
