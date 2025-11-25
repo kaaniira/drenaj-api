@@ -117,9 +117,38 @@ def compute_idf_intensity(max_daily):
 # ============================================================
 #  OSM: Binalar + Arazi Kullanımı
 # ============================================================
+def fetch_osm(lat, lon, radius=200):
+    """
+    radius m yarıçaplı alanda building ve landuse etiketleri
+    (bina sayısı hibritten geldiği için burada bina sayısını
+     sadece landuse ile birlikte yardımcı bilgi olarak kullanıyoruz.)
+    """
+    query = f"""
+    [out:json][timeout:25];
+    (
+      nwr(around:{radius},{lat},{lon})["building"];
+      nwr(around:{radius},{lat},{lon})["landuse"];
+    );
+    out tags;
+    """
+    try:
+        r = requests.post("https://overpass-api.de/api/interpreter",
+                          data={"data": query}, timeout=30)
+        r.raise_for_status()
+        elements = r.json().get("elements", [])
+    except Exception:
+        return 0, [], "OSM API hatası"
 
-# 3) HİBRİT BİNA YOĞUNLUĞU
+    buildings = 0
+    lands = []
+    for el in elements:
+        tags = el.get("tags", {})
+        if "building" in tags:
+            buildings += 1
+        if "landuse" in tags:
+            lands.append(tags["landuse"])
 
+    return buildings, lands, None
 
 # ============================================================
 #  YOĞUNLUK NORMALİZASYONU (Türkiye Kalibrasyonu)
@@ -353,23 +382,6 @@ def analyze():
     if slope_percent is None:
         slope_percent = 0.0
 
-        
-    GOOGLE_KEY = "AIzaSyD8FfIgSed-rL6vU9RGaKw8Z8iotckRJRQ"
-
-    bcount, b_err = hybrid_building_count(lat, lon, radius=200, google_key=GOOGLE_KEY)
-    dens_km2 = density_per_km2(bcount, 200)
-    D = normalize_D(dens_km2)
-    
-    # Geçirgenlik (daha önceki sistem aynı kalıyor)
-    K = clamp(permeability_from_landuse(lands))  # Copernicus raster yakında eklenebilir
-    
-    building_count = bcount
-
-
-
-
-    
-
     # Eğim skoru S (0–1, 30% üstü doyuyor)
     S = clamp(slope_percent / 30.0)
 
@@ -393,12 +405,16 @@ def analyze():
         R_extreme = clamp(0.6 * (maxD / 150.0) + 0.4 * (p99 / 80.0))
 
     # --------------------------------------------------------
-    # 3) OSM BİNA & LANDUSE
+    # 3) HİBRİT BİNA YOĞUNLUĞU (OSM + Google Places)
     # --------------------------------------------------------
-    bcount, lands, osm_error = fetch_osm(lat, lon)
-    area_km2 = math.pi * (0.2 ** 2)  # 200 m yarıçaplı daire
-    dens_km2 = bcount / area_km2 if area_km2 > 0 else 0.0
-    D = normalize_density_turkey(dens_km2)
+    GOOGLE_KEY = "BURAYA_OWN_KEY_YAZ"  # güvenlik için repo'da .env ile saklaman daha iyi
+
+    bcount, b_err = hybrid_building_count(lat, lon, radius=200, google_key=GOOGLE_KEY)
+    dens_km2 = density_per_km2(bcount, 200)
+    D = normalize_D(dens_km2)
+
+    # Landuse sadece geçirgenlik için OSM'den
+    osm_bld_dummy, lands, osm_error = fetch_osm(lat, lon)
     K = clamp(permeability_from_landuse(lands))
 
     # --------------------------------------------------------
@@ -445,7 +461,6 @@ def analyze():
     else:
         FloodRiskLevel = "Çok Yüksek"
 
-
     # --------------------------------------------------------
     # 9) JSON ÇIKTI
     # --------------------------------------------------------
@@ -485,7 +500,7 @@ def analyze():
 
         "dem_error": dem_error,
         "rain_error": rain_error,
-        "osm_error": osm_error,
+        "osm_error": osm_error if osm_error or b_err else None,
         "roads_error": roads_error
     })
 
