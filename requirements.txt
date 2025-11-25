@@ -2,3 +2,8 @@ Flask
 requests
 gunicorn
 flask-cors
+geopandas
+shapely
+rtree
+rasterio
+pyproj
