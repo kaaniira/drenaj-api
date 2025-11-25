@@ -9,6 +9,7 @@ import requests
 import math
 from collections import Counter
 
+
 app = Flask(__name__)
 CORS(app)
 
@@ -16,6 +17,79 @@ CORS(app)
 # ============================================================
 #  YARDIMCI FONKSİYONLAR
 # ============================================================
+
+import numpy as np
+import requests
+from PIL import Image
+from io import BytesIO
+
+def compute_K_copernicus(lat, lon):
+    """
+    Copernicus WorldCover 2021 verisinden (100m) geçirgenlik K hesaplama.
+    500×500 m patch çekiyoruz (5×5 piksel).
+    """
+
+    # 1) Copernicus WorldCover 2021 100m tile URL (ESA resmi)
+    url = (
+        "https://services.terrascope.be/wms/v2?"
+        "SERVICE=WMS&VERSION=1.3.0&REQUEST=GetMap"
+        "&FORMAT=image/png"
+        "&TRANSPARENT=FALSE"
+        "&LAYERS=WORLDCOVER_2021_MAP"
+        "&WIDTH=64&HEIGHT=64"
+        f"&CRS=EPSG:4326&BBOX={lat-0.002},{lon-0.002},{lat+0.002},{lon+0.002}"
+    )
+
+    try:
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        img = Image.open(BytesIO(response.content)).convert("RGB")
+    except Exception:
+        return 0.50  # fallback K
+
+    arr = np.array(img)
+
+    # Copernicus sınıf ID karşılıklarını bulmak için maskeleri kontrol ediyoruz
+    # WorldCover renk kodları (ESA dokümantasyonundan):
+    class_map = {
+        (0, 100, 0): 10,       # Forest
+        (255, 255, 0): 20,     # Shrubland
+        (255, 255, 100): 30,   # Grassland
+        (255, 200, 0): 40,     # Cropland
+        (255, 0, 0): 50,       # Built-up (şehir)
+        (200, 200, 200): 60,   # Bare land
+        (0, 255, 255): 70,     # Snow/Ice
+        (0, 0, 255): 80,       # Water
+    }
+
+    # K karşılıkları:
+    K_values = {
+        10: 0.85,
+        20: 0.70,
+        30: 0.80,
+        40: 0.60,
+        50: 0.20,
+        60: 0.45,
+        70: 0.90,
+        80: 0.00
+    }
+
+    K_list = []
+    for pixel in arr.reshape(-1, 3):
+        pixel_tuple = tuple(pixel)
+        if pixel_tuple in class_map:
+            cls = class_map[pixel_tuple]
+            K_list.append(K_values[cls])
+
+    if len(K_list) == 0:
+        return 0.50
+
+    K_final = float(np.mean(K_list))
+    return max(0.0, min(1.0, K_final))
+
+
+
+
 
 def clamp(v, vmin=0.0, vmax=1.0):
     return max(vmin, min(vmax, v))
@@ -234,28 +308,27 @@ def estimate_catchment_area(total_road_m, K):
 
 def compute_blocks(S, K, W_star, R_extreme):
     """
-    FloodRisk_v2 — K tabanlı, D parametresi tamamen kaldırıldı.
-    Gerçek Türkiye sel verilerine (AFAD + akademik) göre yeniden kalibre edildi.
+    FloodRisk_v3 — Copernicus tabanlı en doğru TÜBİTAK final modeli
     """
 
-    # 1) Kentsel etki (geçirimsiz yüzey)
+    # 1) Kentsel etki (betonlaşma)
     C = 1.0 - K
 
     # 2) Yağış bloğu
-    W_block = 0.7 * W_star + 0.3 * R_extreme
+    W_block = 0.65 * W_star + 0.35 * R_extreme
 
-    # 3) Düzlük etkisi
+    # 3) Topografya
     S_flat = 1.0 - S
 
-    # 4) Lineer sel riski (ana formül)
+    # 4) Lineer sel riski
     FloodRisk_linear = (
-        0.30 * W_block +     # yağış
-        0.45 * C +           # kentsel etki (en önemli)
-        0.20 * S_flat        # topoğrafya
+        0.50 * C +
+        0.30 * W_block +
+        0.15 * S_flat
     )
 
-    # 5) Aşırı yağış boost'u (sadece gerçek ekstrem durumlarda)
-    extreme_boost = max(0.0, R_extreme - 0.8) * 0.4
+    # 5) Ekstrem olay boost'u
+    extreme_boost = max(0.0, R_extreme - 0.85) * 0.35
 
     FloodRisk = clamp(FloodRisk_linear + extreme_boost)
 
@@ -393,7 +466,8 @@ def analyze():
     # 3) OSM → LANDUSE → K
     # --------------------------------------------------------
     bcount, lands, osm_error = fetch_osm(lat, lon)
-    K = clamp(permeability_from_landuse(lands))
+    K = compute_K_copernicus(lat, lon)
+
 
     # --------------------------------------------------------
     # 4) ROADS → HAVZA ALANI
