@@ -267,14 +267,12 @@ def compute_blocks(S, D, K, W_star, R_extreme):
     S_flat = 1.0 - S
 
     # Lineer sel riski
-    FloodRisk_linear = 0.40 * W_block + 0.35 * C + 0.25 * S_flat
+    FloodRisk_linear = 0.36*W_block + 0.34*C + 0.30*S_flat
 
-    # AŞIRI YAĞIŞ BOOST'U:
-    # R_extreme 0.7'nin üzerindeyse (gerçekten çok şiddetli rejim),
-    # FloodRisk'e ekstra +0.0–0.18 arası ek puan veriyoruz.
-    extreme_boost = max(0.0, R_extreme - 0.7) * 0.6
+    extreme_boost = max(0.0, R_extreme - 0.7) * 0.5  # 0–0.15 arası
 
     FloodRisk = clamp(FloodRisk_linear + extreme_boost)
+
 
     return C, W_block, S_flat, FloodRisk
 
