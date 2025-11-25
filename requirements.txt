@@ -7,3 +7,5 @@ shapely
 rtree
 rasterio
 pyproj
+Pillow
+numpy
