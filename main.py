@@ -21,7 +21,7 @@ app = Flask(__name__)
 CORS(app)
 
 SERVICE_ACCOUNT = "earthengine-service@drenaj-v6.iam.gserviceaccount.com"
-KEY_PATH = "service-account.json"
+KEY_PATH = "/etc/secrets/service-account.json"
 
 credentials = ee.ServiceAccountCredentials(SERVICE_ACCOUNT, KEY_PATH)
 ee.Initialize(credentials)
