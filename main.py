@@ -36,28 +36,32 @@ ee.Initialize(credentials)
 
 def get_impervious_K(lat, lon):
     try:
-        # Copernicus Imperviousness Degree
-        dataset = ee.Image("COPERNICUS/HIGH_RESOLUTION_LAYERS/IMD/2018")
-
+        img = ee.Image("ECMWF/CAMS/NRT/0/DEW")  # Surface urban fraction
         point = ee.Geometry.Point([lon, lat])
-        region = point.buffer(150).bounds()  # 300 m alan
 
-        impervious = dataset.select("degree").reduceRegion(
-            reducer=ee.Reducer.mean(),
-            geometry=region,
-            scale=100,
-            maxPixels=1e9
-        ).get("degree").getInfo()
+        region = point.buffer(150).bounds()
 
-        if impervious is None:
-            return 0.5  # fallback
+        value = img.select("u10") \
+                   .reduceRegion(
+                        reducer=ee.Reducer.mean(),
+                        geometry=region,
+                        scale=250,
+                        maxPixels=1e9
+                    ).get("u10").getInfo()
 
-        # impervious (0–100) → K (0–1)
-        K = 1.0 - (impervious / 100.0)
+        if value is None:
+            return 0.5
+
+        # 0–1 değer gelir
+        urban_fraction = float(value)
+
+        # K = geçirgenlik = 1 - kentsel yüzey oranı
+        K = 1.0 - urban_fraction
+
         return max(0.0, min(1.0, K))
 
     except Exception as e:
-        print("EE Error:", e)
+        print("EE ERROR:", e)
         return 0.5
 
 
@@ -502,7 +506,7 @@ def analyze():
         "S_mid": S_mid,
 
         # Bina sayısı sadece bilgi amaçlı (modelde kullanılmıyor)
-        "building_count": bcount,
+        
         "lands": lands,
         "K": K,
 
