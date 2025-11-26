@@ -1,6 +1,6 @@
 # ============================================================
-#  BİYOMİMİKRİ DRENAJ SİSTEMİ — TÜBİTAK v7.0 (K-TABANLI)
-#  D (bina yoğunluğu) tamamen çıkarıldı, sadece K + yağış + eğim
+#  BİYOMİMİKRİ DRENAJ SİSTEMİ — TÜBİTAK v7.1 (DÜZELTİLMİŞ)
+#  K (Geçirgenlik) Sorunu Giderildi + 10m Çözünürlük Eklendi
 # ============================================================
 
 from flask import Flask, request, jsonify
@@ -9,59 +9,99 @@ import requests
 import math
 from collections import Counter
 import numpy as np
-import requests
-from PIL import Image
-from io import BytesIO
 import ee
 import json
-
-
+import os
 
 app = Flask(__name__)
 CORS(app)
 
+# Render'da "Secret Files" olarak eklediğin dosya yolu
+# Eğer Render kullanmıyorsan kendi yerel yolunu yaz
 SERVICE_ACCOUNT = "earthengine-service@drenaj-v6.iam.gserviceaccount.com"
-KEY_PATH = "/etc/secrets/service-account.json"
+KEY_PATH = "/etc/secrets/service-account.json" 
 
-credentials = ee.ServiceAccountCredentials(SERVICE_ACCOUNT, KEY_PATH)
-ee.Initialize(credentials)
-
-
+# Yerelde test ediyorsan hata almamak için kontrol
+if not os.path.exists(KEY_PATH):
+    print(f"UYARI: {KEY_PATH} bulunamadı. GEE çalışmayabilir.")
+else:
+    try:
+        credentials = ee.ServiceAccountCredentials(SERVICE_ACCOUNT, KEY_PATH)
+        ee.Initialize(credentials)
+        print("Google Earth Engine Başarıyla Başlatıldı.")
+    except Exception as e:
+        print(f"GEE Başlatma Hatası: {e}")
 
 # ============================================================
-#  YARDIMCI FONKSİYONLAR
+#  DÜZELTİLMİŞ GEÇİRGENLİK (K) FONKSİYONU
+#  Eski kodda "impervious" bandı yoktu, "urban-coverfraction" olmalıydı.
+#  Ayrıca 100m yerine 10m çözünürlüklü Dynamic World kullanıyoruz.
 # ============================================================
-
-
 
 def get_impervious_K(lat, lon):
     try:
-        dataset = ee.Image("COPERNICUS/Landcover/100m/Proba-V/C3/Global/2019")
-        impervious = dataset.select("impervious")
-
+        # YÖNTEM 1: Dynamic World (10m Çözünürlük - En Hassas)
+        # Güncel (2023-2024) veriyi alır.
         point = ee.Geometry.Point([lon, lat])
-        region = point.buffer(150).bounds()
+        
+        # Son 1.5 yıldaki en temiz görüntüyü alalım
+        dw = ee.ImageCollection("GOOGLE/DYNAMICWORLD/V1") \
+            .filterBounds(point) \
+            .filterDate('2023-01-01', '2024-12-30') \
+            .select('built') \
+            .mean() # Olasılıkların ortalamasını al
 
-        value = impervious.reduceRegion(
+        # 50 metrelik bir yarıçapta ortalama bina yoğunluğuna bak
+        # (Sokak ölçeği için 150m çok genişti, 50m'ye düşürdük)
+        region = point.buffer(50).bounds()
+        
+        value = dw.reduceRegion(
             reducer=ee.Reducer.mean(),
             geometry=region,
-            scale=100,
+            scale=10,  # 10 metre hassasiyet
             maxPixels=1e9
-        ).get("impervious").getInfo()
+        ).get("built").getInfo()
 
+        # Eğer Dynamic World boş dönerse Copernicus'a (Yedek) geç
         if value is None:
-            return 0.5
+            raise ValueError("Dynamic World verisi boş, yedeğe geçiliyor.")
 
-        # impervious = % geçirimsizlik
-        # K = geçirgenlik = (1 - geçirimsizlik)
-        K = 1.0 - float(value) / 100.0
-
+        # value burada 0.0 ile 1.0 arasında bir "yapılaşma olasılığı"dır.
+        # built (yapılaşma) = geçirimsizlik
+        # K (Geçirgenlik) = 1 - built
+        K = 1.0 - float(value)
+        
+        print(f"K Değeri (Dynamic World): {K}")
         return max(0.0, min(1.0, K))
 
     except Exception as e:
-        print("EE ERROR:", e)
-        return 0.5
-
+        print(f"Dynamic World Hatası ({e}), Copernicus'a (100m) geçiliyor...")
+        try:
+            # YÖNTEM 2: Copernicus (Yedek - 100m)
+            # DÜZELTME: Band ismi 'urban-coverfraction' yapıldı.
+            dataset = ee.Image("COPERNICUS/Landcover/100m/Proba-V-C3/Global/2019")
+            impervious_layer = dataset.select("urban-coverfraction")
+            
+            point = ee.Geometry.Point([lon, lat])
+            region = point.buffer(100).bounds()
+            
+            val_backup = impervious_layer.reduceRegion(
+                reducer=ee.Reducer.mean(),
+                geometry=region,
+                scale=100,
+                maxPixels=1e9
+            ).get("urban-coverfraction").getInfo()
+            
+            if val_backup is None:
+                return 0.5
+            
+            # urban-coverfraction 0-100 arası gelir, 100'e bölmeliyiz.
+            K_backup = 1.0 - (float(val_backup) / 100.0)
+            return max(0.0, min(1.0, K_backup))
+            
+        except Exception as e2:
+            print("Tüm GEE kaynakları başarısız:", e2)
+            return 0.5
 
 def clamp(v, vmin=0.0, vmax=1.0):
     return max(vmin, min(vmax, v))
@@ -99,21 +139,17 @@ def get_elevation(lat, lon):
     return None, " / ".join(errors) if errors else "DEM kaynağı hatası"
 
 def estimate_slope_percent(lat, lon):
-    """
-    ~100 m kuzeye gidip yükseklik farkından eğimi hesaplıyoruz.
-    Eğim % cinsinden.
-    """
     h1, err = get_elevation(lat, lon)
     if h1 is None:
         return None, err
 
-    delta_deg = 100.0 / 111320.0  # ~100 m enlem farkı
+    delta_deg = 100.0 / 111320.0  # ~100 m
     h2, err2 = get_elevation(lat + delta_deg, lon)
     if h2 is None:
         return None, err2
 
     dh = h2 - h1
-    slope_percent = abs(dh)  # 100 m’ye bölünmüş olduğu için ~% olarak alıyoruz
+    slope_percent = abs(dh) 
     return slope_percent, None
 
 
@@ -122,9 +158,6 @@ def estimate_slope_percent(lat, lon):
 # ============================================================
 
 def fetch_precip(lat, lon):
-    """
-    2015-01-01 – 2024-12-31 arası günlük toplam yağış
-    """
     try:
         url = (
             "https://archive-api.open-meteo.com/v1/archive?"
@@ -138,36 +171,35 @@ def fetch_precip(lat, lon):
         if not daily:
             return None, None, None, "Yağış verisi boş geldi"
 
+        # None değerleri filtrele (bazen API null döndürebilir)
+        daily = [d for d in daily if d is not None]
+        
+        if not daily:
+             return 0, 0, 0, "Yağış verisi yetersiz"
+
         total = sum(daily)
         meanA = total / 10.0
         maxD = max(daily)
         sorted_p = sorted(daily)
         p99_index = int(0.99 * len(sorted_p))
-        p99 = sorted_p[p99_index]
+        p99 = sorted_p[p99_index] if sorted_p else 0
 
         return meanA, maxD, p99, None
-    except Exception:
+    except Exception as e:
+        print("Yağış Hatası:", e)
         return None, None, None, "Yağış API hatası"
 
 def compute_idf_intensity(max_daily):
-    """
-    Basit IDF yaklaşımı: 27 dakikalık kısa süreli şiddete indirgeme.
-    max_daily mm/gün --> mm/saat civarı
-    """
     if not max_daily:
         return 0.0
     return (max_daily * 1.3) / ((15 + 12) ** 0.75)
 
 
 # ============================================================
-#  OSM: Binalar + Arazi Kullanımı (Sadece K için kullanılıyor)
+#  OSM: Binalar + Arazi Kullanımı 
 # ============================================================
 
 def fetch_osm(lat, lon, radius=200):
-    """
-    radius m yarıçaplı alanda building ve landuse etiketleri
-    (bina sayısı modelden çıkarıldı; sadece lands → K için kullanıyoruz.)
-    """
     query = f"""
     [out:json][timeout:25];
     (
@@ -197,40 +229,10 @@ def fetch_osm(lat, lon, radius=200):
 
 
 # ============================================================
-#  GEÇİRGENLİK: Landuse → K
-#  (İleride Copernicus IMD ile değiştirilebilir)
-# ============================================================
-
-def permeability_from_landuse(lands):
-    """
-    Arazi kullanımına göre yaklaşık geçirgenlik.
-    Değerler DSİ/YTDDSHY'deki C aralıklarının tersine göre ayarlandı.
-    """
-    if not lands:
-        return 0.5
-    mc = Counter(lands).most_common(1)[0][0]
-    table = {
-        "forest": 0.85,
-        "meadow": 0.80,
-        "grass": 0.80,
-        "greenfield": 0.75,
-        "farmland": 0.60,
-        "orchard": 0.60,
-        "residential": 0.35,
-        "commercial": 0.30,
-        "industrial": 0.25
-    }
-    return table.get(mc, 0.5)
-
-
-# ============================================================
 #  OSM ROADS → DİNAMİK HAVZA ALANI (A_m2)
 # ============================================================
 
 def fetch_osm_roads(lat, lon, radius=200):
-    """
-    radius m yarıçaplı alanda highway objelerinin toplam uzunluğu
-    """
     query = f"""
     [out:json][timeout:25];
     (
@@ -261,77 +263,46 @@ def fetch_osm_roads(lat, lon, radius=200):
 
 
 def estimate_catchment_area(total_road_m, K):
-    """
-    Yol uzunluğuna ve geçirgenliğe göre etkili havza alanı.
-    D (bina yoğunluğu) modelden çıkarıldı.
-    """
     if total_road_m <= 0:
-        return 30000.0  # ~3 ha varsayılan
+        return 30000.0 
 
-    W_avg = 10.0  # ortalama yol genişliği
-    A_roads = total_road_m * W_avg * 1.3           # yol yüzeyi
-    A_final = A_roads * (1.0 + 0.5 * (1.0 - K))    # geçirimsizlik çarpanı
+    W_avg = 10.0 
+    A_roads = total_road_m * W_avg * 1.3            
+    A_final = A_roads * (1.0 + 0.5 * (1.0 - K))     
     return A_final
 
 
 # ============================================================
-#  SEL RİSKİ BLOKLARI (K-TABANLI)
+#  SEL RİSKİ BLOKLARI
 # ============================================================
 
 def compute_blocks(S, K, W_star, R_extreme):
-    """
-    FloodRisk_v3 — Copernicus tabanlı en doğru TÜBİTAK final modeli
-    """
-
-    # 1) Kentsel etki (betonlaşma)
     C = 1.0 - K
-
-    # 2) Yağış bloğu
     W_block = 0.65 * W_star + 0.35 * R_extreme
-
-    # 3) Topografya
     S_flat = 1.0 - S
 
-    # 4) Lineer sel riski
     FloodRisk_linear = (
         0.50 * C +
         0.30 * W_block +
         0.15 * S_flat
     )
 
-    # 5) Ekstrem olay boost'u
     extreme_boost = max(0.0, R_extreme - 0.85) * 0.35
-
     FloodRisk = clamp(FloodRisk_linear + extreme_boost)
 
     return C, W_block, S_flat, FloodRisk
 
 
-
-
 # ============================================================
-#  AHP DRENAJ TİPİ SEÇİMİ (D'SİZ)
+#  AHP DRENAJ TİPİ SEÇİMİ
 # ============================================================
 
 def choose_system(S, K, C, FloodRisk):
-    """
-    Dendritik / Paralel / Retiküler / Hibrit skorları
-    D (bina yoğunluğu) çıkarıldı.
-    """
-
-    # Orta eğimi vurgulayan terim
     S_mid = 1.0 - abs(2.0 * S - 1.0)
 
-    # Dendritik: eğim + risk + geçirimsizlik
     Score_DEN = 0.50 * S + 0.30 * FloodRisk + 0.20 * (1.0 - K)
-
-    # Paralel: düşük eğim + geçirgenlik + düşük risk
     Score_PAR = 0.45 * (1.0 - S) + 0.30 * K + 0.25 * (1.0 - FloodRisk)
-
-    # Retiküler: kentsel etki + risk (D yok, C ve FloodRisk'in ağırlığı arttı)
     Score_RET = 0.40 * C + 0.60 * FloodRisk
-
-    # Hibrit: orta eğim + risk + kentsel etki
     Score_HYB = 0.35 * FloodRisk + 0.35 * C + 0.30 * S_mid
 
     scores = {
@@ -346,45 +317,25 @@ def choose_system(S, K, C, FloodRisk):
 
 
 # ============================================================
-#  MANNING BORU ÇAPI
+#  HİDROLİK HESAPLAR
 # ============================================================
 
 def manning_diameter(Q, n, S_bed):
-    """
-    D = ((4^(5/3) * n * Q) / (pi * sqrt(S)))^(3/8)
-    """
     if Q <= 0 or S_bed <= 0:
         return 0.0
     num = (4.0 ** (5.0 / 3.0)) * n * Q
     den = math.pi * math.sqrt(S_bed)
     return (num / den) ** (3.0 / 8.0)
 
-
-# ============================================================
-#  ÖLÇEK / MALZEME SINIFLANDIRMASI
-# ============================================================
-
 def classify_scale(D_mm, Q, A_m2):
-    """
-    Basit mühendislik ölçek sınıflandırması
-    """
     A_ha = A_m2 / 10000.0
-
-    # Street Drain
     if D_mm < 500 and Q < 1.5 and A_ha < 3:
         return "Sokak Hattı", "🟩"
-
-    # Secondary Collector
     if (500 <= D_mm < 1000) or (1.5 <= Q < 5) or (3 <= A_ha < 10):
         return "Mahalle Kolektörü", "🟨"
-
-    # Major Trunk
     return "Ana Kolektör / Trunk", "🟥"
 
 def recommend_material(D_mm, velocity, Q):
-    """
-    Çapa göre kabaca malzeme önerisi.
-    """
     if D_mm >= 1200:
         return "GRP (Cam Elyaf Takviyeli Polyester)"
     if 600 <= D_mm < 1200:
@@ -401,68 +352,42 @@ def recommend_material(D_mm, velocity, Q):
 @app.route("/analyze", methods=["POST"])
 def analyze():
     data = request.get_json(force=True)
-
     lat = float(data["lat"])
     lon = float(data["lon"])
 
-    # --------------------------------------------------------
     # 1) EĞİM
-    # --------------------------------------------------------
     slope_percent, dem_error = estimate_slope_percent(lat, lon)
     if slope_percent is None:
         slope_percent = 0.0
-
-    # Eğim skoru S (0–1, 30% üstü doyuyor)
     S = clamp(slope_percent / 30.0)
-
-    # Manning için taban eğimi (m/m) – 0.3% ile 3% arasına sıkıştır
     raw_bed_slope = (slope_percent or 0.0) / 100.0
     S_bed = max(0.003, min(raw_bed_slope, 0.03))
 
-    # --------------------------------------------------------
     # 2) YAĞIŞ
-    # --------------------------------------------------------
     meanA, maxD, p99, rain_error = fetch_precip(lat, lon)
-
     if meanA is None:
         W_star = 0.5
     else:
-        W_star = clamp(meanA / 1000.0)  # 1000 mm/yıl ve üzeri doyum
-
+        W_star = clamp(meanA / 1000.0)
+    
     if maxD is None or p99 is None:
         R_extreme = 0.5
     else:
         R_extreme = clamp(0.6 * (maxD / 150.0) + 0.4 * (p99 / 80.0))
 
-    # --------------------------------------------------------
-    # 3) OSM → LANDUSE → K
-    # --------------------------------------------------------
+    # 3) GEÇİRGENLİK (K) - ARTIK DÜZELTİLDİ
     K = get_impervious_K(lat, lon)
-    lands = []  # artık landuse kullanmıyoruz
-    osm_error = None
-
-
-
-    # --------------------------------------------------------
-    # 4) ROADS → HAVZA ALANI
-    # --------------------------------------------------------
+    
+    # 4) HAVZA
     road_len, roads_error = fetch_osm_roads(lat, lon)
     A_m2 = estimate_catchment_area(road_len, K)
     A_ha = A_m2 / 10000.0
 
-    # --------------------------------------------------------
-    # 5) RİSK BLOKLARI ve FLOODRISK
-    # --------------------------------------------------------
+    # 5) RİSK & SİSTEM
     C, W_block, S_flat, FloodRisk = compute_blocks(S, K, W_star, R_extreme)
-
-    # --------------------------------------------------------
-    # 6) SİSTEM SEÇİMİ (AHP)
-    # --------------------------------------------------------
     selected, scores, S_mid = choose_system(S, K, C, FloodRisk)
 
-    # --------------------------------------------------------
-    # 7) HİDROLİK (Q, D_mm, hız)
-    # --------------------------------------------------------
+    # 6) HİDROLİK
     i_mm_h = compute_idf_intensity(maxD) if maxD is not None else 0.0
     Q = 0.278 * C * i_mm_h * A_ha
     D_m = manning_diameter(Q, n=0.013, S_bed=S_bed)
@@ -473,70 +398,43 @@ def analyze():
     scale_name, scale_icon = classify_scale(D_mm, Q, A_m2)
     material = recommend_material(D_mm, velocity, Q)
 
-    # --------------------------------------------------------
-    # 8) FLOODRISK SEVİYE METNİ
-    # --------------------------------------------------------
-    if FloodRisk < 0.20:
-        FloodRiskLevel = "Çok Düşük"
-    elif FloodRisk < 0.40:
-        FloodRiskLevel = "Düşük"
-    elif FloodRisk < 0.60:
-        FloodRiskLevel = "Orta"
-    elif FloodRisk < 0.75:
-        FloodRiskLevel = "Yüksek"
-    else:
-        FloodRiskLevel = "Çok Yüksek"
+    if FloodRisk < 0.20: FloodRiskLevel = "Çok Düşük"
+    elif FloodRisk < 0.40: FloodRiskLevel = "Düşük"
+    elif FloodRisk < 0.60: FloodRiskLevel = "Orta"
+    elif FloodRisk < 0.75: FloodRiskLevel = "Yüksek"
+    else: FloodRiskLevel = "Çok Yüksek"
 
-    # --------------------------------------------------------
-    # 9) JSON ÇIKTI
-    # --------------------------------------------------------
     return jsonify({
         "selected_system": selected,
         "scores": scores,
-
         "slope_percent": slope_percent,
         "S": S,
-        "S_flat": S_flat,
-        "S_mid": S_mid,
-
-        # Bina sayısı sadece bilgi amaçlı (modelde kullanılmıyor)
-        
-        "lands": lands,
-        "K": K,
-
+        "K": K, # Artık doğru değer dönecek
+        "C": C,
         "W_star": W_star,
         "R_extreme": R_extreme,
-        "W_block": W_block,
-
-        "C": C,
         "FloodRisk": FloodRisk,
         "FloodRiskLevel": FloodRiskLevel,
-
         "road_length_m": road_len,
         "catchment_area_m2": A_m2,
-
         "Q_m3_s": Q,
         "pipe_diameter_mm": D_mm,
         "velocity_m_s": velocity,
-
         "scale_name": scale_name,
         "scale_icon": scale_icon,
         "material": material,
-
-        "dem_error": dem_error,
-        "rain_error": rain_error,
-        "osm_error": osm_error,
-        "roads_error": roads_error
+        "errors": {
+            "dem": dem_error,
+            "rain": rain_error,
+            "osm": roads_error
+        }
     })
-
 
 @app.route("/")
 def home():
-    return "Drenaj API v7.0 — K tabanlı Biyomimikri + AHP + Manning"
-
+    return "Drenaj API v7.1 — Google Earth Engine Fix"
 
 if __name__ == "__main__":
     app.run()
 
-# Render / gunicorn için:
 application = app
