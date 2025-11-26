@@ -34,69 +34,32 @@ ee.Initialize(credentials)
 
 
 
-def compute_K_copernicus(lat, lon):
-    """
-    Copernicus WorldCover 2021 verisinden (100m) geçirgenlik K hesaplama.
-    500×500 m patch çekiyoruz (5×5 piksel).
-    """
-
-    # 1) Copernicus WorldCover 2021 100m tile URL (ESA resmi)
-    url = (
-        "https://services.terrascope.be/wms/v2?"
-        "SERVICE=WMS&VERSION=1.3.0&REQUEST=GetMap"
-        "&FORMAT=image/png"
-        "&TRANSPARENT=FALSE"
-        "&LAYERS=WORLDCOVER_2021_MAP"
-        "&WIDTH=64&HEIGHT=64"
-        f"&CRS=EPSG:4326&BBOX={lat-0.002},{lon-0.002},{lat+0.002},{lon+0.002}"
-    )
-
+def get_impervious_K(lat, lon):
     try:
-        response = requests.get(url, timeout=10)
-        response.raise_for_status()
-        img = Image.open(BytesIO(response.content)).convert("RGB")
-    except Exception:
-        return 0.50  # fallback K
+        # Copernicus Imperviousness Degree
+        dataset = ee.Image("COPERNICUS/HIGH_RESOLUTION_LAYERS/IMD/2018")
 
-    arr = np.array(img)
+        point = ee.Geometry.Point([lon, lat])
+        region = point.buffer(150).bounds()  # 300 m alan
 
-    # Copernicus sınıf ID karşılıklarını bulmak için maskeleri kontrol ediyoruz
-    # WorldCover renk kodları (ESA dokümantasyonundan):
-    class_map = {
-        (0, 100, 0): 10,       # Forest
-        (255, 255, 0): 20,     # Shrubland
-        (255, 255, 100): 30,   # Grassland
-        (255, 200, 0): 40,     # Cropland
-        (255, 0, 0): 50,       # Built-up (şehir)
-        (200, 200, 200): 60,   # Bare land
-        (0, 255, 255): 70,     # Snow/Ice
-        (0, 0, 255): 80,       # Water
-    }
+        impervious = dataset.select("degree").reduceRegion(
+            reducer=ee.Reducer.mean(),
+            geometry=region,
+            scale=100,
+            maxPixels=1e9
+        ).get("degree").getInfo()
 
-    # K karşılıkları:
-    K_values = {
-        10: 0.85,
-        20: 0.70,
-        30: 0.80,
-        40: 0.60,
-        50: 0.20,
-        60: 0.45,
-        70: 0.90,
-        80: 0.00
-    }
+        if impervious is None:
+            return 0.5  # fallback
 
-    K_list = []
-    for pixel in arr.reshape(-1, 3):
-        pixel_tuple = tuple(pixel)
-        if pixel_tuple in class_map:
-            cls = class_map[pixel_tuple]
-            K_list.append(K_values[cls])
+        # impervious (0–100) → K (0–1)
+        K = 1.0 - (impervious / 100.0)
+        return max(0.0, min(1.0, K))
 
-    if len(K_list) == 0:
-        return 0.50
+    except Exception as e:
+        print("EE Error:", e)
+        return 0.5
 
-    K_final = float(np.mean(K_list))
-    return max(0.0, min(1.0, K_final))
 
 
 
@@ -476,8 +439,10 @@ def analyze():
     # --------------------------------------------------------
     # 3) OSM → LANDUSE → K
     # --------------------------------------------------------
-    bcount, lands, osm_error = fetch_osm(lat, lon)
-    K = compute_K_copernicus(lat, lon)
+       K = get_impervious_K(lat, lon)
+    lands = []  # artık landuse kullanmıyoruz
+    osm_error = None
+
 
 
     # --------------------------------------------------------
