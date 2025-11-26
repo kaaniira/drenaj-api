@@ -34,7 +34,7 @@ ee.Initialize(credentials)
 
 
 
-ddef get_impervious_K(lat, lon):
+def get_impervious_K(lat, lon):
     try:
         dataset = ee.Image("COPERNICUS/Landcover/100m/Proba-V/C3/Global/2019")
         impervious = dataset.select("impervious")
