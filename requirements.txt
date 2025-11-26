@@ -9,3 +9,4 @@ rasterio
 pyproj
 Pillow
 numpy
+earthengine-api
