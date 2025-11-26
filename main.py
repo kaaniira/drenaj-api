@@ -12,10 +12,20 @@ import numpy as np
 import requests
 from PIL import Image
 from io import BytesIO
+import ee
+import json
+
 
 
 app = Flask(__name__)
 CORS(app)
+
+SERVICE_ACCOUNT = "earthengine-service@drenaj-v6.iam.gserviceaccount.com"
+KEY_PATH = "service-account.json"
+
+credentials = ee.ServiceAccountCredentials(SERVICE_ACCOUNT, KEY_PATH)
+ee.Initialize(credentials)
+
 
 
 # ============================================================
