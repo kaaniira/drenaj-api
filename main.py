@@ -34,39 +34,33 @@ ee.Initialize(credentials)
 
 
 
-def get_impervious_K(lat, lon):
+ddef get_impervious_K(lat, lon):
     try:
-        img = ee.Image("ECMWF/CAMS/NRT/0/DEW")  # Surface urban fraction
-        point = ee.Geometry.Point([lon, lat])
+        dataset = ee.Image("COPERNICUS/Landcover/100m/Proba-V/C3/Global/2019")
+        impervious = dataset.select("impervious")
 
+        point = ee.Geometry.Point([lon, lat])
         region = point.buffer(150).bounds()
 
-        value = img.select("u10") \
-                   .reduceRegion(
-                        reducer=ee.Reducer.mean(),
-                        geometry=region,
-                        scale=250,
-                        maxPixels=1e9
-                    ).get("u10").getInfo()
+        value = impervious.reduceRegion(
+            reducer=ee.Reducer.mean(),
+            geometry=region,
+            scale=100,
+            maxPixels=1e9
+        ).get("impervious").getInfo()
 
         if value is None:
             return 0.5
 
-        # 0–1 değer gelir
-        urban_fraction = float(value)
-
-        # K = geçirgenlik = 1 - kentsel yüzey oranı
-        K = 1.0 - urban_fraction
+        # impervious = % geçirimsizlik
+        # K = geçirgenlik = (1 - geçirimsizlik)
+        K = 1.0 - float(value) / 100.0
 
         return max(0.0, min(1.0, K))
 
     except Exception as e:
         print("EE ERROR:", e)
         return 0.5
-
-
-
-
 
 
 def clamp(v, vmin=0.0, vmax=1.0):
