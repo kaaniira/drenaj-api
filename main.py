@@ -439,7 +439,7 @@ def analyze():
     # --------------------------------------------------------
     # 3) OSM → LANDUSE → K
     # --------------------------------------------------------
-       K = get_impervious_K(lat, lon)
+    K = get_impervious_K(lat, lon)
     lands = []  # artık landuse kullanmıyoruz
     osm_error = None
 
