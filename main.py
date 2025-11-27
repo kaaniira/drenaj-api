@@ -1,7 +1,7 @@
 # ============================================================
-#  BİYOMİMİKRİ DRENAJ SİSTEMİ — TÜBİTAK v8.2 (BUG FIX)
-#  Düzeltme: 'K_value' API yanıtına eklendi.
-#  Veri: Sentinel-2, ESA 10m, OpenLandMap, SRTM, Open-Meteo
+#  BİYOMİMİKRİ DRENAJ SİSTEMİ — TÜBİTAK v8.3 (UNIT FIX)
+#  Düzeltme: Debi formülündeki birim hatası (Ha -> km2) düzeltildi.
+#  Boru çapı artık 2000mm tavanına takılmayacak.
 # ============================================================
 
 from flask import Flask, request, jsonify
@@ -23,7 +23,7 @@ if os.path.exists(KEY_PATH):
     try:
         credentials = ee.ServiceAccountCredentials(SERVICE_ACCOUNT, KEY_PATH)
         ee.Initialize(credentials)
-        print("GEE Başlatıldı (v8.2 - Bug Fix)")
+        print("GEE Başlatıldı (v8.3 - Unit Fix)")
     except Exception as e:
         print(f"GEE Hatası: {e}")
 else:
@@ -144,7 +144,13 @@ def analyze():
         t_c = max(5.0, min(45.0, 0.0195 * (math.pow(L_flow, 0.77) / math.pow(S_metric, 0.385))))
 
         i_val = (maxRain * 1.5) / ((t_c/60.0 + 0.15)**0.7)
-        Q_current = 0.278 * C * i_val * 1.5 
+        
+        # --- DÜZELTME BURADA ---
+        # 1.5 Hektar = 0.015 km2
+        # Formül: Q (m3/s) = 0.278 * C * I (mm/h) * A (km2)
+        area_km2 = 1.5 / 100.0 
+        Q_current = 0.278 * C * i_val * area_km2 
+        
         Q_future = Q_current * Climate_Factor 
         
         S_bed = max(0.005, S_metric)
@@ -177,7 +183,7 @@ def analyze():
             "location_type": f"{land_type} ({soil_desc})",
             "ndvi": round(ndvi, 2),
             "slope_percent": round(slope_pct, 2),
-            "K_value": round(K_final, 2), # <-- DÜZELTİLDİ: Artık K değeri gönderiliyor
+            "K_value": round(K_final, 2),
             "FloodRisk": round(FloodRisk, 2),
             "FloodRiskLevel": lvl,
             "selected_system": selected,
