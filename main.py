@@ -1,8 +1,6 @@
 # ============================================================
-#  BİYOMİMİKRİ DRENAJ SİSTEMİ — TÜBİTAK v8.1 (CLIMATE READY)
-#  Yenilikler: İklim Değişikliği Projeksiyonu (%15 Artış)
-#              Biyo-Tabanlı Çözüm Önerileri (Yeşil Altyapı)
-#              Maliyet İndeksi Tahmini
+#  BİYOMİMİKRİ DRENAJ SİSTEMİ — TÜBİTAK v8.2 (BUG FIX)
+#  Düzeltme: 'K_value' API yanıtına eklendi.
 #  Veri: Sentinel-2, ESA 10m, OpenLandMap, SRTM, Open-Meteo
 # ============================================================
 
@@ -25,7 +23,7 @@ if os.path.exists(KEY_PATH):
     try:
         credentials = ee.ServiceAccountCredentials(SERVICE_ACCOUNT, KEY_PATH)
         ee.Initialize(credentials)
-        print("GEE Başlatıldı (v8.1 - Climate Ready)")
+        print("GEE Başlatıldı (v8.2 - Bug Fix)")
     except Exception as e:
         print(f"GEE Hatası: {e}")
 else:
@@ -115,7 +113,7 @@ def analyze():
         
         raw_C = 1.0 - K_cover
         C = clamp(raw_C * soil_factor * veg_factor)
-        K_final = 1.0 - C
+        K_final = 1.0 - C # Nihai Geçirgenlik
 
         # 3. RİSK HESABI
         W_blk = 0.6*W_star + 0.4*R_ext
@@ -139,49 +137,35 @@ def analyze():
         selected = max(scores, key=scores.get)
 
         # 5. İKLİM DEĞİŞİKLİĞİ VE HİDROLİK
-        # IPCC: Gelecek 50 yılda aşırı yağışların %15 artması bekleniyor.
         Climate_Factor = 1.15 
-        
         n_roughness = 0.025 if selected in ["meandering", "radial", "hybrid"] else 0.013
         
-        # Kirpich
         L_flow, S_metric = 100.0, max(0.01, slope_pct / 100.0)
         t_c = max(5.0, min(45.0, 0.0195 * (math.pow(L_flow, 0.77) / math.pow(S_metric, 0.385))))
 
-        # Debi (İklim Faktörlü)
         i_val = (maxRain * 1.5) / ((t_c/60.0 + 0.15)**0.7)
         Q_current = 0.278 * C * i_val * 1.5 
-        Q_future = Q_current * Climate_Factor # Gelecek projeksiyonlu debi
+        Q_future = Q_current * Climate_Factor 
         
         S_bed = max(0.005, S_metric)
         D_mm = (((4**(5/3)) * n_roughness * Q_future) / (math.pi * math.sqrt(S_bed)))**(3/8) * 1000.0
         
-        # Malzeme & Maliyet İndeksi (Birim Maliyet Tahmini)
-        cost_index = 1
+        # Malzeme
         mat = "PVC"
         if selected in ["meandering", "radial"]:
             mat = "Doğal Taş Kanal / Gabion"
-            cost_index = 3 # İşçilik yüksek
         elif D_mm >= 500:
             mat = "Betonarme / GRP"
-            cost_index = 5 # Büyük çap pahalı
         elif D_mm >= 200:
             mat = "HDPE (Koruge)"
-            cost_index = 2
         
-        # 6. YEŞİL ALTYAPI ÖNERİLERİ (Biyo-Çözüm)
-        # Sadece boru değil, tamamlayıcı çözüm öneriyoruz.
+        # 6. YEŞİL ALTYAPI & SU HASADI
         bio_solution = "Standart Peyzaj"
-        if C > 0.7: # Çok beton
-            bio_solution = "Yeşil Çatı & Geçirimli Beton"
-        elif slope_pct > 15: # Çok dik
-            bio_solution = "Teraslama & Erozyon Önleyici Örtü"
-        elif selected == "radial":
-            bio_solution = "Yağmur Bahçesi (Rain Garden)"
-        elif selected == "dendritic":
-            bio_solution = "Bitkili Biyo-Hendek (Bioswale)"
+        if C > 0.7: bio_solution = "Yeşil Çatı & Geçirimli Beton"
+        elif slope_pct > 15: bio_solution = "Teraslama & Erozyon Önleyici"
+        elif selected == "radial": bio_solution = "Yağmur Bahçesi (Rain Garden)"
+        elif selected == "dendritic": bio_solution = "Bitkili Biyo-Hendek"
         
-        # 7. SU HASADI
         harvest_area = 15000.0
         harvest_potential = (harvest_area * (meanRain/1000.0) * 0.85 * (raw_C)) 
 
@@ -193,12 +177,13 @@ def analyze():
             "location_type": f"{land_type} ({soil_desc})",
             "ndvi": round(ndvi, 2),
             "slope_percent": round(slope_pct, 2),
+            "K_value": round(K_final, 2), # <-- DÜZELTİLDİ: Artık K değeri gönderiliyor
             "FloodRisk": round(FloodRisk, 2),
             "FloodRiskLevel": lvl,
             "selected_system": selected,
             "pipe_diameter_mm": round(D_mm, 0),
             "material": mat,
-            "Q_flow": round(Q_future, 3), # İklim faktörlü debi
+            "Q_flow": round(Q_future, 3),
             "rain_stats": {
                 "mean_annual_mm": round(meanRain, 1),
                 "max_daily_mm": round(maxRain, 1)
@@ -207,8 +192,7 @@ def analyze():
                 "harvest_ton_year": round(harvest_potential, 0),
                 "vegetation_factor": round(veg_factor, 2),
                 "climate_projection": "IPCC +%15 Artış",
-                "bio_solution": bio_solution,
-                "cost_index": cost_index
+                "bio_solution": bio_solution
             }
         })
 
