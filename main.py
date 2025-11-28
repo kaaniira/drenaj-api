@@ -1,8 +1,9 @@
 # ============================================================
-#  BİYOMİMİKRİ DRENAJ SİSTEMİ — TÜBİTAK v9.1 (HYDRAULIC CALIBRATED)
+#  BİYOMİMİKRİ DRENAJ SİSTEMİ — TÜBİTAK v9.3 (HYBRID LOGIC FIX)
 #  Düzeltme (Risk): v8.9 Risk modeli (başarılı) korundu.
 #  Düzeltme (AHP): v9.0 AHP modeli (başarılı) korundu.
-#  Düzeltme (Hidrolik): i_val katsayısı (1.5->2.0) boru çaplarını artırmak için güncellendi.
+#  Düzeltme (Hidrolik): v9.2 Akıllı Hidrolik modeli (Dinamik F_iklim) korundu.
+#  Düzeltme (Mantık): 'hybrid' sistemin 'Doğal Taş Kanal' olarak hatalı sınıflandırılması düzeltildi.
 # ============================================================
 
 from flask import Flask, request, jsonify
@@ -23,7 +24,7 @@ if os.path.exists(KEY_PATH):
     try:
         credentials = ee.ServiceAccountCredentials(SERVICE_ACCOUNT, KEY_PATH)
         ee.Initialize(credentials)
-        print("GEE Başlatıldı (v9.1 - Hydraulic Calibrated)")
+        print("GEE Başlatıldı (v9.3 - Hybrid Logic Fix)")
     except Exception as e:
         print(f"GEE Hatası: {e}")
 else:
@@ -163,14 +164,25 @@ def analyze():
 
         # 6. HİDROLİK VE DİĞER HESAPLAR
         Climate_Factor = 1.15 
-        n_roughness = 0.025 if selected in ["meandering", "radial", "hybrid"] else 0.013
+        
+        # --- DÜZELTME (v9.3): 'hybrid' sistemi pürüzlü (doğal) kategoriden çıkarıldı. ---
+        n_roughness = 0.025 if selected in ["meandering", "radial"] else 0.013
+        # --- (Düzeltme Sonu) ---
         
         S_metric = max(0.01, slope_pct / 100.0)
         t_c = max(5.0, min(45.0, 0.0195 * (math.pow(L_flow, 0.77) / math.pow(S_metric, 0.385))))
 
-        # --- DÜZELTME: HİDROLİK KALİBRASYON (v9.1) ---
-        # Şiddet çarpanı 1.5'ten 2.0'a yükseltildi.
-        i_val = (maxRain * 2.0) / ((t_c/60.0 + 0.15)**0.7)
+        # --- v9.2 AKILLI HİDROLİK MODEL (KORUNDU) ---
+        F_iklim = 2.0 # Standart/Marmara/Ege (İstanbul, Ankara)
+        
+        if meanRain > 1500: # Çok yağışlı (Karadeniz - Rize, Trabzon)
+            F_iklim = 1.7 
+        elif meanRain < 400: # Çok kurak (İç Anadolu - Konya)
+            F_iklim = 3.0
+        elif meanRain > 800 and meanRain <= 1500: # Akdeniz (Antalya)
+            F_iklim = 2.5
+        
+        i_val = (maxRain * F_iklim) / ((t_c/60.0 + 0.15)**0.7)
         # --- (Düzeltme Sonu) ---
         
         Q_future = (0.278 * C * i_val * analysis_area_km2) * Climate_Factor 
@@ -178,12 +190,15 @@ def analyze():
         S_bed = max(0.005, S_metric)
         D_mm = (((4**(5/3)) * n_roughness * Q_future) / (math.pi * math.sqrt(S_bed)))**(3/8) * 1000.0
         
+        # --- DÜZELTME (v9.3): Malzeme ataması 'hybrid' için düzeltildi. ---
         mat = "PVC"
+        # 'hybrid' artık bu kategoriye girmiyor
         if selected in ["meandering", "radial"]: mat = "Doğal Taş Kanal"
         elif D_mm >= 500: mat = "Betonarme"
         elif D_mm >= 200: mat = "Koruge (HDPE)"
+        # --- (Düzeltme Sonu) ---
         
-        bio_solution = "Standart Peyaj"
+        bio_solution = "Standart Peyzaj"
         if C > 0.7: bio_solution = "Yeşil Çatı & Geçirimli Beton"
         elif slope_pct > 15: bio_solution = "Teraslama & Erozyon Önleyici"
         elif selected == "radial": bio_solution = "Yağmur Bahçesi (Rain Garden)"
