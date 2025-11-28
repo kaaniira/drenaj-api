@@ -1,9 +1,10 @@
 # ============================================================
-#  BİYOMİMİKRİ DRENAJ SİSTEMİ — TÜBİTAK v9.3 (HYBRID LOGIC FIX)
+#  BİYOMİMİKRİ DRENAJ SİSTEMİ — TÜBİTAK v9.4 (FINAL CALIBRATED)
 #  Düzeltme (Risk): v8.9 Risk modeli (başarılı) korundu.
 #  Düzeltme (AHP): v9.0 AHP modeli (başarılı) korundu.
-#  Düzeltme (Hidrolik): v9.2 Akıllı Hidrolik modeli (Dinamik F_iklim) korundu.
-#  Düzeltme (Mantık): 'hybrid' sistemin 'Doğal Taş Kanal' olarak hatalı sınıflandırılması düzeltildi.
+#  Düzeltme (Hidrolik): v9.3 Akıllı Hidrolik modeli, mühendislik güvenliği için
+#                     daha yüksek bir baz (F_iklim = 2.5) ile yeniden ayarlandı.
+#  Düzeltme (Mantık): v9.3 Hybrid mantık hatası düzeltmesi korundu.
 # ============================================================
 
 from flask import Flask, request, jsonify
@@ -24,7 +25,7 @@ if os.path.exists(KEY_PATH):
     try:
         credentials = ee.ServiceAccountCredentials(SERVICE_ACCOUNT, KEY_PATH)
         ee.Initialize(credentials)
-        print("GEE Başlatıldı (v9.3 - Hybrid Logic Fix)")
+        print("GEE Başlatıldı (v9.4 - Final Calibrated)")
     except Exception as e:
         print(f"GEE Hatası: {e}")
 else:
@@ -152,7 +153,7 @@ def analyze():
         elif selected == "parallel":
             reason_txt = f"Arazi eğiminin tek yönlü ve düzenli olması (%{slope_pct:.1f}), suyun paralel hatlar boyunca en hızlı şekilde tahliye edilmesini gerektirmektedir."
         elif selected == "reticular":
-            reason_txt = f"Bölgedeki yüksek geçirimsizlik (K={K_final:.2f}) ve karmaşık kentsel doku, çok yönlü akışa izin veren ağsı (Retiküler) yapıyı zorunlu kılmıştır."
+            reason_txt = f"Bölgedeki yüksek geçirimsizlik (K={K_final:.2f}) ve karmaşık kentsel doku, çok yönlü akışa izin veren ağsı (Retiküler) yapıyı zorlu kılmıştır."
         elif selected == "pinnate":
             reason_txt = f"Dik eğimli (%{slope_pct:.1f}) ve dar koridor yapısındaki bu alanda, suyu ana hatta hızlıca iletmek için balık kılçığı (Pinnate) modeli seçilmiştir."
         elif selected == "radial":
@@ -165,22 +166,22 @@ def analyze():
         # 6. HİDROLİK VE DİĞER HESAPLAR
         Climate_Factor = 1.15 
         
-        # --- DÜZELTME (v9.3): 'hybrid' sistemi pürüzlü (doğal) kategoriden çıkarıldı. ---
+        # --- v9.3 MANTIK DÜZELTMESİ (KORUNDU) ---
         n_roughness = 0.025 if selected in ["meandering", "radial"] else 0.013
-        # --- (Düzeltme Sonu) ---
         
         S_metric = max(0.01, slope_pct / 100.0)
         t_c = max(5.0, min(45.0, 0.0195 * (math.pow(L_flow, 0.77) / math.pow(S_metric, 0.385))))
 
-        # --- v9.2 AKILLI HİDROLİK MODEL (KORUNDU) ---
-        F_iklim = 2.0 # Standart/Marmara/Ege (İstanbul, Ankara)
+        # --- DÜZELTME: GÜVENLİ AKILLI HİDROLİK MODEL (v9.4) ---
+        # Standart/Marmara/Ege (İstanbul, Ankara) için YENİ BAZ DEĞER:
+        F_iklim = 2.5 
         
-        if meanRain > 1500: # Çok yağışlı (Karadeniz - Rize, Trabzon)
-            F_iklim = 1.7 
-        elif meanRain < 400: # Çok kurak (İç Anadolu - Konya)
+        if meanRain > 1500: # Karadeniz (Rize) - Baz değerden DÜŞÜK
+            F_iklim = 2.2 
+        elif meanRain < 400: # Kurak (Konya) - Baz değerden YÜKSEK
+            F_iklim = 3.5
+        elif meanRain > 800 and meanRain <= 1500: # Akdeniz (Antalya, Trabzon) - YÜKSEK
             F_iklim = 3.0
-        elif meanRain > 800 and meanRain <= 1500: # Akdeniz (Antalya)
-            F_iklim = 2.5
         
         i_val = (maxRain * F_iklim) / ((t_c/60.0 + 0.15)**0.7)
         # --- (Düzeltme Sonu) ---
@@ -190,13 +191,11 @@ def analyze():
         S_bed = max(0.005, S_metric)
         D_mm = (((4**(5/3)) * n_roughness * Q_future) / (math.pi * math.sqrt(S_bed)))**(3/8) * 1000.0
         
-        # --- DÜZELTME (v9.3): Malzeme ataması 'hybrid' için düzeltildi. ---
+        # --- v9.3 MANTIK DÜZELTMESİ (KORUNDU) ---
         mat = "PVC"
-        # 'hybrid' artık bu kategoriye girmiyor
         if selected in ["meandering", "radial"]: mat = "Doğal Taş Kanal"
         elif D_mm >= 500: mat = "Betonarme"
         elif D_mm >= 200: mat = "Koruge (HDPE)"
-        # --- (Düzeltme Sonu) ---
         
         bio_solution = "Standart Peyzaj"
         if C > 0.7: bio_solution = "Yeşil Çatı & Geçirimli Beton"
