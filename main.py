@@ -1,8 +1,7 @@
 # ============================================================
-#  BİYOMİMİKRİ DRENAJ SİSTEMİ — TÜBİTAK v8.7 (CALIBRATED - FULL)
-#  Düzeltme (Risk): Risk modeli (1-S) yerine S_risk kullanacak şekilde kalibre edildi.
-#  Düzeltme (AHP): Sc_RET (Kentsel) modelin C'ye duyarlılığı artırıldı.
-#  Düzeltme (Kod): SyntaxError giderildi (Eksik except bloğu eklendi).
+#  BİYOMİMİKRİ DRENAJ SİSTEMİ — TÜBİTAK v8.8 (FINAL AHP TUNE)
+#  Düzeltme (Risk): v8.7 Risk modeli (S_risk) korundu (Başarılı).
+#  Düzeltme (AHP): Sc_RET (Kentsel) daha agresif, Sc_RAD (Radyal) betondan kaçınacak şekilde ayarlandı.
 # ============================================================
 
 from flask import Flask, request, jsonify
@@ -23,7 +22,7 @@ if os.path.exists(KEY_PATH):
     try:
         credentials = ee.ServiceAccountCredentials(SERVICE_ACCOUNT, KEY_PATH)
         ee.Initialize(credentials)
-        print("GEE Başlatıldı (v8.7 - Calibrated Model)")
+        print("GEE Başlatıldı (v8.8 - Final AHP Tune)")
     except Exception as e:
         print(f"GEE Hatası: {e}")
 else:
@@ -99,7 +98,6 @@ def analyze():
         d = request.get_json(force=True)
         lat, lon = float(d["lat"]), float(d["lon"])
 
-        # --- TUTARLI ALAN VE AKIŞ UZUNLUĞU ---
         GEE_BUFFER_RADIUS_M = 100.0
         analysis_area_m2 = math.pi * (GEE_BUFFER_RADIUS_M ** 2.0)
         analysis_area_km2 = analysis_area_m2 / 1000000.0
@@ -118,34 +116,32 @@ def analyze():
         C = clamp(raw_C * soil_factor * veg_factor)
         K_final = 1.0 - C
 
-        # --- DÜZELTME 1: KALİBRE EDİLMİŞ RİSK MODELİ (v8.7) ---
+        # --- v8.7 RİSK MODELİ (BAŞARILI OLDUĞU İÇİN KORUNDU) ---
         W_blk = 0.6*W_star + 0.4*R_ext
-        
-        # S_risk: Düşük eğim (S=0) ve Yüksek eğim (S=1) için 1.0; 
-        # Orta eğim (S=0.5) için 0.0 değerini alır.
         S_risk = abs(2.0*S - 1.0) 
-        
-        # Risk_Lin formülü (1-S) yerine S_risk kullanıyor.
         Risk_Lin = 0.40*W_blk + 0.40*C + 0.20*S_risk
-        
         FloodRisk = clamp(Risk_Lin + max(0, R_ext-0.75)*0.4)
-        # --- (Düzeltme 1 Sonu) ---
+        # --- (Risk Modeli Sonu) ---
 
 
-        # --- DÜZELTME 2: İYİLEŞTİRİLMİŞ AHP (v8.7) ---
-        S_mid = 1.0 - abs(2.0*S - 1.0) # Orta eğimi seven skor
+        # --- DÜZELTME: KALİBRE EDİLMİŞ AHP (v8.8) ---
+        S_mid = 1.0 - abs(2.0*S - 1.0)
         
         Sc_DEN = 0.40*S_mid + 0.40*FloodRisk + 0.20*(1-K_final)
         Sc_PAR = 0.50*S + 0.30*K_final + 0.20*(1-FloodRisk)
         
-        # Retiküler (Ağsı/Kentsel) sistemin C (geçirimsizlik) ağırlığını artırıyoruz.
-        Sc_RET = 0.70*C + 0.30*FloodRisk
+        # Retiküler (Kentsel) için C (geçirimsizlik) ağırlığı 0.8'e yükseltildi.
+        Sc_RET = 0.80*C + 0.20*FloodRisk
         
         Sc_PIN = 0.50*S + 0.30*C + 0.20*W_star
-        Sc_RAD = 0.60*(1.0-S) + 0.40*FloodRisk
+        
+        # Radyal (Düz) sistem artık K_final (geçirgenlik) tercih ediyor.
+        # Bu, kentsel (düşük K) alanda seçilme şansını düşürecek.
+        Sc_RAD = 0.50*(1.0-S) + 0.30*K_final + 0.20*FloodRisk
+        
         Sc_MEA = 0.80*S + 0.20*(1-C)
         Sc_HYB = 0.35*FloodRisk + 0.35*C + 0.30*S_mid
-        # --- (Düzeltme 2 Sonu) ---
+        # --- (Düzeltme Sonu) ---
 
         scores = {
             "dendritic": round(Sc_DEN, 3), "parallel": round(Sc_PAR, 3), "reticular": round(Sc_RET, 3),
@@ -164,7 +160,8 @@ def analyze():
         elif selected == "pinnate":
             reason_txt = f"Dik eğimli (%{slope_pct:.1f}) ve dar koridor yapısındaki bu alanda, suyu ana hatta hızlıca iletmek için balık kılçığı (Pinnate) modeli seçilmiştir."
         elif selected == "radial":
-            reason_txt = f"Arazinin düz yapısı (%{slope_pct:.1f} eğim) ve merkezi toplanma karakteristiği, suyun merkezden dışarı veya dışarıdan merkeze alındığı Radyal sistemi gerektirir."
+            # Düzeltme: Radial reason_txt K_final ile çelişiyordu, düzeltildi.
+            reason_txt = f"Arazinin düz yapısı (%{slope_pct:.1f} eğim) ve geçirgen zemini (K={K_final:.2f}), suyun merkezi bir yağmur bahçesinde toplandığı (Radyal) sistemi gerektirir."
         elif selected == "meandering":
             reason_txt = f"UYARI: Bölgedeki çok dik eğim (%{slope_pct:.1f}), suyun hızını ve erozyon riskini artırmaktadır. Bu nedenle suyu yavaşlatarak taşıyan kıvrımlı (Menderes) yapı seçilmiştir."
         else:
@@ -200,7 +197,6 @@ def analyze():
         lvl_idx = int(FloodRisk * 4.9)
         lvl = ["Çok Düşük","Düşük","Orta","Yüksek","Kritik"][min(lvl_idx, 4)]
 
-        # --- HATA DÜZELTMESİ: EKSİK RETURN BLOĞU BURADAYDI ---
         return jsonify({
             "status": "success",
             "location_type": f"{land_type} ({soil_desc})",
@@ -210,8 +206,8 @@ def analyze():
             "FloodRisk": round(FloodRisk, 2),
             "FloodRiskLevel": lvl,
             "selected_system": selected,
-            "system_reasoning": reason_txt,
-            "scores": scores,
+            "system_reasoning": reason_txt, 
+            "scores": scores,               
             "pipe_diameter_mm": round(D_mm, 0),
             "material": mat,
             "Q_flow": round(Q_future, 3),
@@ -221,17 +217,13 @@ def analyze():
             "debug_analysis_radius_m": GEE_BUFFER_RADIUS_M
         })
 
-    # --- HATA DÜZELTMESİ: EKSİK EXCEPT BLOĞU BURADAYDI ---
     except Exception as e:
-        # Gunicorn'un loguna daha detaylı hata basmak için
         app.logger.error(f"Analysis Error: {e}") 
         import traceback
         app.logger.error(traceback.format_exc())
-        
         return jsonify({"status":"error", "msg":str(e)}), 500
 
 if __name__ == "__main__":
     app.run()
 
-# Gunicorn'un 'application' değişkenini bulabilmesi için
 application = app
