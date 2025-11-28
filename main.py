@@ -1,7 +1,8 @@
 # ============================================================
-#  BİYOMİMİKRİ DRENAJ SİSTEMİ — TÜBİTAK v8.9 (FINAL RISK TUNE)
-#  Düzeltme (Risk): Risk modeli, kentsel alan (C) riskini artırmak için son kez ayarlandı.
-#  Düzeltme (AHP): v8.8 AHP modeli (başarılı olduğu için) korundu.
+#  BİYOMİMİKRİ DRENAJ SİSTEMİ — TÜBİTAK v9.0 (AHP CALIBRATED)
+#  Düzeltme (Risk): v8.9 Risk modeli (başarılı) korundu.
+#  Düzeltme (AHP): Eğim algısı kalibre edildi (S = slope/15.0).
+#  Düzeltme (AHP): Sc_RAD (Radyal) formülü düz arazilere odaklandı.
 # ============================================================
 
 from flask import Flask, request, jsonify
@@ -22,7 +23,7 @@ if os.path.exists(KEY_PATH):
     try:
         credentials = ee.ServiceAccountCredentials(SERVICE_ACCOUNT, KEY_PATH)
         ee.Initialize(credentials)
-        print("GEE Başlatıldı (v8.9 - Final Risk Tune)")
+        print("GEE Başlatıldı (v9.0 - AHP Calibrated)")
     except Exception as e:
         print(f"GEE Hatası: {e}")
 else:
@@ -109,33 +110,37 @@ def analyze():
         ndvi = get_ndvi_data(lat, lon, GEE_BUFFER_RADIUS_M)
 
         # 2. HİDROLOJİK HESAPLAR
-        S = clamp(slope_pct / 25.0)
+        
+        # --- DÜZELTME 1 (AHP v9.0): EĞİM ALGISI DÜZELTMESİ ---
+        # Tavan 25'ten 15'e çekildi. Artık %7.5 "orta eğim" (S=0.5) kabul ediliyor.
+        S = clamp(slope_pct / 15.0) 
+        # --- (Düzeltme 1 Sonu) ---
+        
         veg_factor = 1.0 - (ndvi * 0.15) if ndvi > 0.2 else 1.0
         
         raw_C = 1.0 - K_cover
         C = clamp(raw_C * soil_factor * veg_factor)
         K_final = 1.0 - C
 
-        # --- DÜZELTME: SON RİSK AYARI (v8.9) ---
+        # --- v8.9 RİSK MODELİ (BAŞARILI OLDUĞU İÇİN KORUNDU) ---
         W_blk = 0.6*W_star + 0.4*R_ext
         S_risk = abs(2.0*S - 1.0) 
-        
-        # Risk ağırlıkları Yağış (W_blk) ve Geçirimsizlik (C) lehine artırıldı.
-        # Eğim riski (S_risk) faktörü azaltıldı.
         Risk_Lin = 0.45*W_blk + 0.45*C + 0.10*S_risk
-        
         FloodRisk = clamp(Risk_Lin + max(0, R_ext-0.75)*0.4)
         # --- (Risk Modeli Sonu) ---
 
 
-        # --- v8.8 AHP MODELİ (BAŞARILI OLDUĞU İÇİN KORUNDU) ---
-        S_mid = 1.0 - abs(2.0*S - 1.0)
+        # --- DÜZELTME 2 (AHP v9.0): SİSTEM SEÇİM DÜZELTMESİ ---
+        S_mid = 1.0 - abs(2.0*S - 1.0) # Bu formül aynı, ama S'nin girdisi değişti.
         
-        Sc_DEN = 0.40*S_mid + 0.40*FloodRisk + 0.20*(1-K_final)
+        Sc_DEN = 0.40*S_mid + 0.40*FloodRisk + 0.20*K_final
         Sc_PAR = 0.50*S + 0.30*K_final + 0.20*(1-FloodRisk)
         Sc_RET = 0.80*C + 0.20*FloodRisk
         Sc_PIN = 0.50*S + 0.30*C + 0.20*W_star
-        Sc_RAD = 0.50*(1.0-S) + 0.30*K_final + 0.20*FloodRisk
+        
+        # Radyal (Düz) sistemin formülü, (1-S) ağırlığı artırılarak keskinleştirildi.
+        Sc_RAD = 0.70*(1.0-S) + 0.20*K_final + 0.10*FloodRisk
+        
         Sc_MEA = 0.80*S + 0.20*(1-C)
         Sc_HYB = 0.35*FloodRisk + 0.35*C + 0.30*S_mid
         # --- (AHP Modeli Sonu) ---
@@ -146,7 +151,7 @@ def analyze():
         }
         selected = max(scores, key=scores.get)
 
-        # 5. KARAR AÇIKLAMASI (v8.8'de güncellenmişti)
+        # 5. KARAR AÇIKLAMASI (Reason text'ler doğru)
         reason_txt = "Bilinmiyor."
         if selected == "dendritic":
             reason_txt = f"Bölgedeki orta seviye eğim (%{slope_pct:.1f}) ve doğal akış hatlarının varlığı, suyu yerçekimiyle toplamak için en verimli olan ağaç dalları (Dendritik) yapısını öne çıkarmıştır."
@@ -163,7 +168,7 @@ def analyze():
         else:
             reason_txt = "Bölgedeki karmaşık topografya ve değişken zemin yapısı, birden fazla sistemin özelliklerini taşıyan Hibrit bir çözümü gerektirmektedir."
 
-        # 6. HİDROLİK VE DİĞER HESAPLAR
+        # 6. HİDROLİK VE DİĞER HESAPLAR (Değişiklik yok)
         Climate_Factor = 1.15 
         n_roughness = 0.025 if selected in ["meandering", "radial", "hybrid"] else 0.013
         
