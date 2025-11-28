@@ -1,7 +1,7 @@
 # ============================================================
-#  BİYOMİMİKRİ DRENAJ SİSTEMİ — TÜBİTAK v8.5 (EXPLAINABLE AI)
-#  Yenilik: "Reasoning" (Neden Seçildi?) Metni Oluşturma
-#  Veri: Sentinel-2, ESA 10m, OpenLandMap, SRTM, Open-Meteo
+#  BİYOMİMİKRİ DRENAJ SİSTEMİ — TÜBİTAK v8.6 (CONSISTENT MODEL)
+#  Düzeltme: Alan tutarsızlığı (GEE buffer vs hardcoded area) giderildi.
+#  Düzeltme: AHP mantığı (Sc_PAR, Sc_DEN) reason_txt ile uyumlu hale getirildi.
 # ============================================================
 
 from flask import Flask, request, jsonify
@@ -22,7 +22,7 @@ if os.path.exists(KEY_PATH):
     try:
         credentials = ee.ServiceAccountCredentials(SERVICE_ACCOUNT, KEY_PATH)
         ee.Initialize(credentials)
-        print("GEE Başlatıldı (v8.5 - Açıklanabilir Yapı)")
+        print("GEE Başlatıldı (v8.6 - Tutarlı Model)")
     except Exception as e:
         print(f"GEE Hatası: {e}")
 else:
@@ -32,10 +32,12 @@ def clamp(v, vmin=0.0, vmax=1.0):
     return max(vmin, min(vmax, v))
 
 # --- 1. NDVI (Bitki) ---
-def get_ndvi_data(lat, lon):
+# Yarıçap parametresi eklendi
+def get_ndvi_data(lat, lon, buffer_radius_m):
     try:
         point = ee.Geometry.Point([lon, lat])
-        area = point.buffer(50)
+        # Yarıçap artık dinamik
+        area = point.buffer(buffer_radius_m) 
         s2 = ee.ImageCollection("COPERNICUS/S2_SR") \
             .filterBounds(point) \
             .filterDate('2023-06-01', '2023-09-30') \
@@ -47,10 +49,12 @@ def get_ndvi_data(lat, lon):
     except: return 0.0
 
 # --- 2. ALAN VERİLERİ (ESA, SRTM, Toprak) ---
-def get_advanced_area_data(lat, lon):
+# Yarıçap parametresi eklendi
+def get_advanced_area_data(lat, lon, buffer_radius_m):
     try:
         point = ee.Geometry.Point([lon, lat])
-        area = point.buffer(50)
+        # Yarıçap artık dinamik
+        area = point.buffer(buffer_radius_m) 
 
         dataset = ee.ImageCollection("ESA/WorldCover/v200").first()
         from_cls = [10, 20, 30, 40, 50, 60, 80, 90, 95, 100]
@@ -62,7 +66,8 @@ def get_advanced_area_data(lat, lon):
         land_type = land_map.get(mode_cls, "Karma Alan")
 
         soil_img = ee.Image("OpenLandMap/SOL/SOL_TEXTURE-CLASS_USDA-TT_M/v02").select("b0")
-        soil_mode = soil_img.reduceRegion(ee.Reducer.mode(), area, 250).get("b0").getInfo()
+        # Not: Toprak verisi kaba çözünürlüklü olduğu için buffer(250) kalabilir, bu bir hata değil.
+        soil_mode = soil_img.reduceRegion(ee.Reducer.mode(), area.buffer(250), 250).get("b0").getInfo()
         soil_factor = 1.0
         soil_desc = "Normal Toprak"
         if soil_mode:
@@ -71,8 +76,9 @@ def get_advanced_area_data(lat, lon):
             elif sm in [9, 10, 11, 12]: soil_factor, soil_desc = 0.85, "Kumlu (Geçirgen)"
 
         dem = ee.Image("USGS/SRTMGL1_003")
-        slope_val = ee.Terrain.slope(dem).reduceRegion(ee.Reducer.mean(), area, 30).get("slope").getInfo()
-        slope_pct = float(slope_val) * 1.5 if slope_val else 0.0
+         # Not: Eğim verisi 30m çözünürlüklü, buffer(30) kalabilir.
+        slope_val = ee.Terrain.slope(dem).reduceRegion(ee.Reducer.mean(), area.buffer(30), 30).get("slope").getInfo()
+        slope_pct = float(slope_val) * 1.5 if slope_val else 0.0 # Eğim ayarı (proje özel)
 
         return mean_k, soil_factor, land_type, soil_desc, slope_pct
     except: return 0.5, 1.0, "Bilinmiyor", "Bilinmiyor", 0.0
@@ -98,10 +104,20 @@ def analyze():
         d = request.get_json(force=True)
         lat, lon = float(d["lat"]), float(d["lon"])
 
-        # 1. VERİLERİ TOPLA
-        K_cover, soil_factor, land_type, soil_desc, slope_pct = get_advanced_area_data(lat, lon)
+        # --- DÜZELTME 1: TUTARLI ALAN VE AKIŞ UZUNLUĞU ---
+        # GEE'den veri çekeceğimiz ve hidrolik hesapta kullanacağımız alan
+        # 100m yarıçaplı dairesel havza varsayımı (100m = 0.01 km2 * pi = 3.14 Ha)
+        GEE_BUFFER_RADIUS_M = 100.0
+        analysis_area_m2 = math.pi * (GEE_BUFFER_RADIUS_M ** 2.0)
+        analysis_area_km2 = analysis_area_m2 / 1000000.0 # (km2'ye çevir)
+        
+        # Kirpich formülü için akış uzunluğunu yarıçap varsayıyoruz
+        L_flow = GEE_BUFFER_RADIUS_M 
+
+        # 1. VERİLERİ TOPLA (Dinamik yarıçap ile)
+        K_cover, soil_factor, land_type, soil_desc, slope_pct = get_advanced_area_data(lat, lon, GEE_BUFFER_RADIUS_M)
         W_star, R_ext, maxRain, meanRain = get_rain_10years(lat, lon)
-        ndvi = get_ndvi_data(lat, lon)
+        ndvi = get_ndvi_data(lat, lon, GEE_BUFFER_RADIUS_M)
 
         # 2. HİDROLOJİK HESAPLAR
         S = clamp(slope_pct / 25.0)
@@ -117,14 +133,22 @@ def analyze():
         FloodRisk = clamp(Risk_Lin + max(0, R_ext-0.75)*0.4)
 
         # 4. AHP SKORLAMA (7 Sistem)
-        Sc_DEN = 0.40*S + 0.40*FloodRisk + 0.20*(1-K_final)
-        Sc_PAR = 0.50*(1-S) + 0.30*K_final + 0.20*(1-FloodRisk)
+        
+        # --- DÜZELTME 2A: AHP MANTIĞI (Dendritik) ---
+        # S_mid: Orta eğimi (S=0.5 civarı) tercih eden skor
+        S_mid = 1.0 - abs(2.0*S - 1.0) 
+        # Sc_DEN 'S' yerine 'S_mid' kullanacak (reason_txt: "orta seviye eğim")
+        Sc_DEN = 0.40*S_mid + 0.40*FloodRisk + 0.20*(1-K_final)
+        
+        # --- DÜZELTME 2B: AHP MANTIĞI (Paralel) ---
+        # '(1-S)' (düşük eğim) yerine 'S' (yüksek eğim) kullanacak (reason_txt: "tek yönlü eğim")
+        Sc_PAR = 0.50*S + 0.30*K_final + 0.20*(1-FloodRisk)
+        
         Sc_RET = 0.60*C + 0.40*FloodRisk
         Sc_PIN = 0.50*S + 0.30*C + 0.20*W_star
         Sc_RAD = 0.60*(1.0-S) + 0.40*FloodRisk
         Sc_MEA = 0.80*S + 0.20*(1-C)
-        S_mid = 1.0 - abs(2.0*S - 1.0)
-        Sc_HYB = 0.35*FloodRisk + 0.35*C + 0.30*S_mid
+        Sc_HYB = 0.35*FloodRisk + 0.35*C + 0.30*S_mid # Hibrit zaten S_mid kullanıyor (Doğru)
 
         scores = {
             "dendritic": round(Sc_DEN, 3), "parallel": round(Sc_PAR, 3), "reticular": round(Sc_RET, 3),
@@ -134,6 +158,7 @@ def analyze():
 
         # 5. KARAR AÇIKLAMASI (Reasoning Text)
         reason_txt = "Bilinmiyor."
+        # (Reason text'leriniz AHP'deki yeni mantıkla artık daha uyumlu)
         if selected == "dendritic":
             reason_txt = f"Bölgedeki orta seviye eğim (%{slope_pct:.1f}) ve doğal akış hatlarının varlığı, suyu yerçekimiyle toplamak için en verimli olan ağaç dalları (Dendritik) yapısını öne çıkarmıştır."
         elif selected == "parallel":
@@ -153,12 +178,14 @@ def analyze():
         Climate_Factor = 1.15 
         n_roughness = 0.025 if selected in ["meandering", "radial", "hybrid"] else 0.013
         
-        L_flow, S_metric = 100.0, max(0.01, slope_pct / 100.0)
+        # L_flow (akış uzunluğu) yukarıda dinamik olarak tanımlandı
+        S_metric = max(0.01, slope_pct / 100.0)
         t_c = max(5.0, min(45.0, 0.0195 * (math.pow(L_flow, 0.77) / math.pow(S_metric, 0.385))))
 
         i_val = (maxRain * 1.5) / ((t_c/60.0 + 0.15)**0.7)
-        area_km2 = 1.5 / 100.0 
-        Q_future = (0.278 * C * i_val * area_km2) * Climate_Factor 
+        
+        # area_km2 yukarıda dinamik olarak hesaplandı
+        Q_future = (0.278 * C * i_val * analysis_area_km2) * Climate_Factor 
         
         S_bed = max(0.005, S_metric)
         D_mm = (((4**(5/3)) * n_roughness * Q_future) / (math.pi * math.sqrt(S_bed)))**(3/8) * 1000.0
@@ -175,7 +202,9 @@ def analyze():
         elif selected == "radial": bio_solution = "Yağmur Bahçesi (Rain Garden)"
         elif selected == "dendritic": bio_solution = "Biyo-Hendek (Bioswale)"
         
-        harvest = (15000.0 * (meanRain/1000.0) * 0.85 * (1.0 - K_final)) 
+        # --- DÜZELTME 3: SABİT DEĞER (Hasat) ---
+        # Sabit 15000.0 yerine dinamik 'analysis_area_m2' kullanıldı
+        harvest = (analysis_area_m2 * (meanRain/1000.0) * 0.85 * (1.0 - K_final)) 
 
         lvl_idx = int(FloodRisk * 4.9)
         lvl = ["Çok Düşük","Düşük","Orta","Yüksek","Kritik"][min(lvl_idx, 4)]
@@ -189,13 +218,16 @@ def analyze():
             "FloodRisk": round(FloodRisk, 2),
             "FloodRiskLevel": lvl,
             "selected_system": selected,
-            "system_reasoning": reason_txt,  # <-- YENİ EKLENDİ
-            "scores": scores,                # <-- YENİ EKLENDİ
+            "system_reasoning": reason_txt,
+            "scores": scores,
             "pipe_diameter_mm": round(D_mm, 0),
             "material": mat,
             "Q_flow": round(Q_future, 3),
             "rain_stats": { "mean": round(meanRain, 1), "max": round(maxRain, 1) },
-            "eco_stats": { "harvest": round(harvest, 0), "bio_solution": bio_solution }
+            "eco_stats": { "harvest": round(harvest, 0), "bio_solution": bio_solution },
+            # Analiz tutarlılığı için bu verileri de eklemek faydalı olabilir:
+            "debug_analysis_area_ha": round(analysis_area_m2 / 10000.0, 2),
+            "debug_analysis_radius_m": GEE_BUFFER_RADIUS_M
         })
 
     except Exception as e:
