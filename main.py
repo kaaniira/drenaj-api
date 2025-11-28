@@ -1,8 +1,8 @@
 # ============================================================
-#  BİYOMİMİKRİ DRENAJ SİSTEMİ — TÜBİTAK v9.0 (AHP CALIBRATED)
+#  BİYOMİMİKRİ DRENAJ SİSTEMİ — TÜBİTAK v9.1 (HYDRAULIC CALIBRATED)
 #  Düzeltme (Risk): v8.9 Risk modeli (başarılı) korundu.
-#  Düzeltme (AHP): Eğim algısı kalibre edildi (S = slope/15.0).
-#  Düzeltme (AHP): Sc_RAD (Radyal) formülü düz arazilere odaklandı.
+#  Düzeltme (AHP): v9.0 AHP modeli (başarılı) korundu.
+#  Düzeltme (Hidrolik): i_val katsayısı (1.5->2.0) boru çaplarını artırmak için güncellendi.
 # ============================================================
 
 from flask import Flask, request, jsonify
@@ -23,7 +23,7 @@ if os.path.exists(KEY_PATH):
     try:
         credentials = ee.ServiceAccountCredentials(SERVICE_ACCOUNT, KEY_PATH)
         ee.Initialize(credentials)
-        print("GEE Başlatıldı (v9.0 - AHP Calibrated)")
+        print("GEE Başlatıldı (v9.1 - Hydraulic Calibrated)")
     except Exception as e:
         print(f"GEE Hatası: {e}")
 else:
@@ -110,11 +110,7 @@ def analyze():
         ndvi = get_ndvi_data(lat, lon, GEE_BUFFER_RADIUS_M)
 
         # 2. HİDROLOJİK HESAPLAR
-        
-        # --- DÜZELTME 1 (AHP v9.0): EĞİM ALGISI DÜZELTMESİ ---
-        # Tavan 25'ten 15'e çekildi. Artık %7.5 "orta eğim" (S=0.5) kabul ediliyor.
-        S = clamp(slope_pct / 15.0) 
-        # --- (Düzeltme 1 Sonu) ---
+        S = clamp(slope_pct / 15.0) # v9.0 AHP Kalibrasyonu
         
         veg_factor = 1.0 - (ndvi * 0.15) if ndvi > 0.2 else 1.0
         
@@ -130,17 +126,14 @@ def analyze():
         # --- (Risk Modeli Sonu) ---
 
 
-        # --- DÜZELTME 2 (AHP v9.0): SİSTEM SEÇİM DÜZELTMESİ ---
-        S_mid = 1.0 - abs(2.0*S - 1.0) # Bu formül aynı, ama S'nin girdisi değişti.
+        # --- v9.0 AHP MODELİ (BAŞARILI OLDUĞU İÇİN KORUNDU) ---
+        S_mid = 1.0 - abs(2.0*S - 1.0)
         
-        Sc_DEN = 0.40*S_mid + 0.40*FloodRisk + 0.20*K_final
+        Sc_DEN = 0.40*S_mid + 0.40*FloodRisk + 0.20*(K_final)
         Sc_PAR = 0.50*S + 0.30*K_final + 0.20*(1-FloodRisk)
         Sc_RET = 0.80*C + 0.20*FloodRisk
         Sc_PIN = 0.50*S + 0.30*C + 0.20*W_star
-        
-        # Radyal (Düz) sistemin formülü, (1-S) ağırlığı artırılarak keskinleştirildi.
         Sc_RAD = 0.70*(1.0-S) + 0.20*K_final + 0.10*FloodRisk
-        
         Sc_MEA = 0.80*S + 0.20*(1-C)
         Sc_HYB = 0.35*FloodRisk + 0.35*C + 0.30*S_mid
         # --- (AHP Modeli Sonu) ---
@@ -151,7 +144,7 @@ def analyze():
         }
         selected = max(scores, key=scores.get)
 
-        # 5. KARAR AÇIKLAMASI (Reason text'ler doğru)
+        # 5. KARAR AÇIKLAMASI (Değişiklik yok)
         reason_txt = "Bilinmiyor."
         if selected == "dendritic":
             reason_txt = f"Bölgedeki orta seviye eğim (%{slope_pct:.1f}) ve doğal akış hatlarının varlığı, suyu yerçekimiyle toplamak için en verimli olan ağaç dalları (Dendritik) yapısını öne çıkarmıştır."
@@ -162,20 +155,23 @@ def analyze():
         elif selected == "pinnate":
             reason_txt = f"Dik eğimli (%{slope_pct:.1f}) ve dar koridor yapısındaki bu alanda, suyu ana hatta hızlıca iletmek için balık kılçığı (Pinnate) modeli seçilmiştir."
         elif selected == "radial":
-            reason_txt = f"Arazinin düz yapısı (%{slope_pct:.1f} eğim) ve geçirgen zemini (K={K_final:.2f}), suyun merkezi bir yağmur bahçesinde toplandığı (Radyal) sistemi gerektirir."
+            reason_txt = f"Arazinin düz yapısı (%{slope_pct:.1f} eğim) ve geçirgen zemini (K={K_final:.2f}), suyun merkezi bir yağmur bahçesinde topladığı (Radyal) sistemi gerektirir."
         elif selected == "meandering":
             reason_txt = f"UYARI: Bölgedeki çok dik eğim (%{slope_pct:.1f}), suyun hızını ve erozyon riskini artırmaktadır. Bu nedenle suyu yavaşlatarak taşıyan kıvrımlı (Menderes) yapı seçilmiştir."
         else:
             reason_txt = "Bölgedeki karmaşık topografya ve değişken zemin yapısı, birden fazla sistemin özelliklerini taşıyan Hibrit bir çözümü gerektirmektedir."
 
-        # 6. HİDROLİK VE DİĞER HESAPLAR (Değişiklik yok)
+        # 6. HİDROLİK VE DİĞER HESAPLAR
         Climate_Factor = 1.15 
         n_roughness = 0.025 if selected in ["meandering", "radial", "hybrid"] else 0.013
         
         S_metric = max(0.01, slope_pct / 100.0)
         t_c = max(5.0, min(45.0, 0.0195 * (math.pow(L_flow, 0.77) / math.pow(S_metric, 0.385))))
 
-        i_val = (maxRain * 1.5) / ((t_c/60.0 + 0.15)**0.7)
+        # --- DÜZELTME: HİDROLİK KALİBRASYON (v9.1) ---
+        # Şiddet çarpanı 1.5'ten 2.0'a yükseltildi.
+        i_val = (maxRain * 2.0) / ((t_c/60.0 + 0.15)**0.7)
+        # --- (Düzeltme Sonu) ---
         
         Q_future = (0.278 * C * i_val * analysis_area_km2) * Climate_Factor 
         
@@ -187,7 +183,7 @@ def analyze():
         elif D_mm >= 500: mat = "Betonarme"
         elif D_mm >= 200: mat = "Koruge (HDPE)"
         
-        bio_solution = "Standart Peyzaj"
+        bio_solution = "Standart Peyaj"
         if C > 0.7: bio_solution = "Yeşil Çatı & Geçirimli Beton"
         elif slope_pct > 15: bio_solution = "Teraslama & Erozyon Önleyici"
         elif selected == "radial": bio_solution = "Yağmur Bahçesi (Rain Garden)"
