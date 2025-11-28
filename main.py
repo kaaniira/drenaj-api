@@ -1,7 +1,7 @@
 # ============================================================
-#  BİYOMİMİKRİ DRENAJ SİSTEMİ — TÜBİTAK v8.8 (FINAL AHP TUNE)
-#  Düzeltme (Risk): v8.7 Risk modeli (S_risk) korundu (Başarılı).
-#  Düzeltme (AHP): Sc_RET (Kentsel) daha agresif, Sc_RAD (Radyal) betondan kaçınacak şekilde ayarlandı.
+#  BİYOMİMİKRİ DRENAJ SİSTEMİ — TÜBİTAK v8.9 (FINAL RISK TUNE)
+#  Düzeltme (Risk): Risk modeli, kentsel alan (C) riskini artırmak için son kez ayarlandı.
+#  Düzeltme (AHP): v8.8 AHP modeli (başarılı olduğu için) korundu.
 # ============================================================
 
 from flask import Flask, request, jsonify
@@ -22,7 +22,7 @@ if os.path.exists(KEY_PATH):
     try:
         credentials = ee.ServiceAccountCredentials(SERVICE_ACCOUNT, KEY_PATH)
         ee.Initialize(credentials)
-        print("GEE Başlatıldı (v8.8 - Final AHP Tune)")
+        print("GEE Başlatıldı (v8.9 - Final Risk Tune)")
     except Exception as e:
         print(f"GEE Hatası: {e}")
 else:
@@ -116,32 +116,29 @@ def analyze():
         C = clamp(raw_C * soil_factor * veg_factor)
         K_final = 1.0 - C
 
-        # --- v8.7 RİSK MODELİ (BAŞARILI OLDUĞU İÇİN KORUNDU) ---
+        # --- DÜZELTME: SON RİSK AYARI (v8.9) ---
         W_blk = 0.6*W_star + 0.4*R_ext
         S_risk = abs(2.0*S - 1.0) 
-        Risk_Lin = 0.40*W_blk + 0.40*C + 0.20*S_risk
+        
+        # Risk ağırlıkları Yağış (W_blk) ve Geçirimsizlik (C) lehine artırıldı.
+        # Eğim riski (S_risk) faktörü azaltıldı.
+        Risk_Lin = 0.45*W_blk + 0.45*C + 0.10*S_risk
+        
         FloodRisk = clamp(Risk_Lin + max(0, R_ext-0.75)*0.4)
         # --- (Risk Modeli Sonu) ---
 
 
-        # --- DÜZELTME: KALİBRE EDİLMİŞ AHP (v8.8) ---
+        # --- v8.8 AHP MODELİ (BAŞARILI OLDUĞU İÇİN KORUNDU) ---
         S_mid = 1.0 - abs(2.0*S - 1.0)
         
         Sc_DEN = 0.40*S_mid + 0.40*FloodRisk + 0.20*(1-K_final)
         Sc_PAR = 0.50*S + 0.30*K_final + 0.20*(1-FloodRisk)
-        
-        # Retiküler (Kentsel) için C (geçirimsizlik) ağırlığı 0.8'e yükseltildi.
         Sc_RET = 0.80*C + 0.20*FloodRisk
-        
         Sc_PIN = 0.50*S + 0.30*C + 0.20*W_star
-        
-        # Radyal (Düz) sistem artık K_final (geçirgenlik) tercih ediyor.
-        # Bu, kentsel (düşük K) alanda seçilme şansını düşürecek.
         Sc_RAD = 0.50*(1.0-S) + 0.30*K_final + 0.20*FloodRisk
-        
         Sc_MEA = 0.80*S + 0.20*(1-C)
         Sc_HYB = 0.35*FloodRisk + 0.35*C + 0.30*S_mid
-        # --- (Düzeltme Sonu) ---
+        # --- (AHP Modeli Sonu) ---
 
         scores = {
             "dendritic": round(Sc_DEN, 3), "parallel": round(Sc_PAR, 3), "reticular": round(Sc_RET, 3),
@@ -149,7 +146,7 @@ def analyze():
         }
         selected = max(scores, key=scores.get)
 
-        # 5. KARAR AÇIKLAMASI (Reasoning Text)
+        # 5. KARAR AÇIKLAMASI (v8.8'de güncellenmişti)
         reason_txt = "Bilinmiyor."
         if selected == "dendritic":
             reason_txt = f"Bölgedeki orta seviye eğim (%{slope_pct:.1f}) ve doğal akış hatlarının varlığı, suyu yerçekimiyle toplamak için en verimli olan ağaç dalları (Dendritik) yapısını öne çıkarmıştır."
@@ -160,7 +157,6 @@ def analyze():
         elif selected == "pinnate":
             reason_txt = f"Dik eğimli (%{slope_pct:.1f}) ve dar koridor yapısındaki bu alanda, suyu ana hatta hızlıca iletmek için balık kılçığı (Pinnate) modeli seçilmiştir."
         elif selected == "radial":
-            # Düzeltme: Radial reason_txt K_final ile çelişiyordu, düzeltildi.
             reason_txt = f"Arazinin düz yapısı (%{slope_pct:.1f} eğim) ve geçirgen zemini (K={K_final:.2f}), suyun merkezi bir yağmur bahçesinde toplandığı (Radyal) sistemi gerektirir."
         elif selected == "meandering":
             reason_txt = f"UYARI: Bölgedeki çok dik eğim (%{slope_pct:.1f}), suyun hızını ve erozyon riskini artırmaktadır. Bu nedenle suyu yavaşlatarak taşıyan kıvrımlı (Menderes) yapı seçilmiştir."
