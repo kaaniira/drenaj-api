@@ -1,9 +1,9 @@
 # ============================================================
-#  BİYOMİMİKRİ DRENAJ SİSTEMİ — TÜBİTAK v11.2 (ELEVATION FIX)
+#  BİYOMİMİKRİ DRENAJ SİSTEMİ — TÜBİTAK v11.3 (ELEVATION DEFAULT FIX)
 #  Düzeltme (Risk): v11.0 "Kurak Kent Cezası" (Arid Penalty) korundu.
-#  Düzeltme (Mantık): v11.1'deki 'land_type' kontrolü başarısız oldu.
-#                   Deniz/Göl tespiti için Rakım (Elevation <= 0) 
-#                   kontrolü eklendi (v11.2).
+#  Düzeltme (Mantık): v11.2'deki 'else 9999.0' mantığı hatalıydı.
+#                   GEE'den 'None' (veri yok/deniz) gelince,
+#                   rakımın '0.0' olarak ayarlanması sağlandı (v11.3).
 # ============================================================
 
 from flask import Flask, request, jsonify
@@ -24,7 +24,7 @@ if os.path.exists(KEY_PATH):
     try:
         credentials = ee.ServiceAccountCredentials(SERVICE_ACCOUNT, KEY_PATH)
         ee.Initialize(credentials)
-        print("GEE Başlatıldı (v11.2 - Elevation Fix)")
+        print("GEE Başlatıldı (v11.3 - Elevation Default Fix)")
     except Exception as e:
         print(f"GEE Hatası: {e}")
 else:
@@ -78,14 +78,18 @@ def get_advanced_area_data(lat, lon, buffer_radius_m):
         slope_val = ee.Terrain.slope(dem).reduceRegion(ee.Reducer.mean(), area.buffer(30), 30).get("slope").getInfo()
         slope_pct = float(slope_val) * 1.5 if slope_val else 0.0 
 
-        # --- v11.2 DEĞİŞİKLİK (1/2) ---
-        # Sadece eğimi değil, rakımın kendisini de al
-        elevation = dem.reduceRegion(ee.Reducer.mean(), area, 30).get("elevation").getInfo()
-        elevation = float(elevation) if elevation is not None else 9999.0 # (Eğer veri yoksa 9999 ata)
+        # --- v11.3 DEĞİŞİKLİK ---
+        # Rakım verisi GEE'den 'None' (veri yok/deniz) olarak gelirse,
+        # bunu 9999.0 (Hatalı) değil, 0.0 (Doğru) olarak ata.
+        elevation_result = dem.reduceRegion(ee.Reducer.mean(), area, 30).get("elevation")
+        elevation = elevation_result.getInfo()
+        elevation = float(elevation) if elevation is not None else 0.0 
+        # --- (Düzeltme Sonu) ---
 
         return mean_k, soil_factor, land_type, soil_desc, slope_pct, elevation
     except: 
-        return 0.5, 1.0, "Bilinmiyor", "Bilinmiyor", 0.0, 9999.0
+        # Hata durumunda bile 0.0 döndürerek su kontrolünü tetikle
+        return 0.5, 1.0, "Bilinmiyor", "Bilinmiyor", 0.0, 0.0
 
 # --- 3. YAĞIŞ ---
 def get_rain_10years(lat, lon):
@@ -119,12 +123,9 @@ def analyze():
         L_flow = GEE_BUFFER_RADIUS_M 
 
         # 1. VERİLERİ TOPLA
-        # --- v11.2 DEĞİŞİKLİK (2/2) ---
-        # Fonksiyondan 'elevation' verisini de al
         K_cover, soil_factor, land_type, soil_desc, slope_pct, elevation = get_advanced_area_data(lat, lon, GEE_BUFFER_RADIUS_M)
 
-        # --- v11.2 RAKIM KONTROLÜ ---
-        # Eğer rakım 0 veya altındaysa (deniz/göl), analizi durdur.
+        # --- v11.3 RAKIM KONTROLÜ (v11.2 ile aynı, ama artık doğru veri geliyor) ---
         if elevation <= 0:
             return jsonify({
                 "status": "water", 
@@ -193,7 +194,7 @@ def analyze():
         elif selected == "pinnate":
             reason_txt = f"Dik eğimli (%{slope_pct:.1f}) ve dar koridor yapısındaki bu alanda, suyu ana hatta hızlıca iletmek için balık kılçığı (Pinnate) modeli seçilmiştir."
         elif selected == "radial":
-            reason_txt = f"Arazinin düz yapısı (%{slope_pct:.1f} eğim) ve geçirgen zemini (K={K_final:.2f}), suyun merkezi bir yağmur bahçesinde topladığı (Radyal) sistemi gerektirir."
+            reason_txt = f"Arazinin düz yapısı (%{slope_pct:.1f} eğim) ve geçirgen zemini (K={K_final:.2f}), suyun merkezi bir yağmur bahçesi topladığı (Radyal) sistemi gerektirir."
         elif selected == "meandering":
             reason_txt = f"UYARI: Bölgedeki çok dik eğim (%{slope_pct:.1f}), suyun hızını ve erozyon riskini artırmaktadır. Bu nedenle suyu yavaşlatarak taşıyan kıvrımlı (Menderes) yapı seçilmiştir."
         else:
@@ -253,7 +254,7 @@ def analyze():
             "eco_stats": { "harvest": round(harvest, 0), "bio_solution": bio_solution },
             "debug_analysis_area_ha": round(analysis_area_m2 / 10000.0, 2),
             "debug_analysis_radius_m": GEE_BUFFER_RADIUS_M,
-            "debug_elevation": elevation # (Frontend'de görmek isterseniz)
+            "debug_elevation": elevation 
         })
 
     except Exception as e:
