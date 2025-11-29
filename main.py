@@ -1,10 +1,10 @@
 # ============================================================
-#  BİYOMİMİKRİ DRENAJ SİSTEMİ — TÜBİTAK v9.4 (FINAL CALIBRATED)
-#  Düzeltme (Risk): v8.9 Risk modeli (başarılı) korundu.
+#  BİYOMİMİKRİ DRENAJ SİSTEMİ — TÜBİTAK v11.0 (ARID PENALTY FIX)
+#  Düzeltme (Risk): v9.4 modeli, 10 noktalı testte başarısız oldu (Ankara/Şanlıurfa).
+#                   Model, "Kurak Kent Seli" (Arid Urban Penalty) mantığı
+#                   eklenerek yeniden kalibre edildi.
 #  Düzeltme (AHP): v9.0 AHP modeli (başarılı) korundu.
-#  Düzeltme (Hidrolik): v9.3 Akıllı Hidrolik modeli, mühendislik güvenliği için
-#                     daha yüksek bir baz (F_iklim = 2.5) ile yeniden ayarlandı.
-#  Düzeltme (Mantık): v9.3 Hybrid mantık hatası düzeltmesi korundu.
+#  Düzeltme (Hidrolik): v9.4 Akıllı Hidrolik modeli (başarılı) korundu.
 # ============================================================
 
 from flask import Flask, request, jsonify
@@ -25,7 +25,7 @@ if os.path.exists(KEY_PATH):
     try:
         credentials = ee.ServiceAccountCredentials(SERVICE_ACCOUNT, KEY_PATH)
         ee.Initialize(credentials)
-        print("GEE Başlatıldı (v9.4 - Final Calibrated)")
+        print("GEE Başlatıldı (v11.0 - Arid Penalty Fix)")
     except Exception as e:
         print(f"GEE Hatası: {e}")
 else:
@@ -89,7 +89,11 @@ def get_rain_10years(lat, lon):
         if not clean: return 0.5, 0.5, 50.0, 500.0
         meanA = sum(clean) / 10.0
         maxD = max(clean)
-        return clamp(meanA/1000.0), clamp(maxD/120.0), maxD, meanA
+        
+        W_star = clamp(meanA / 1000.0) # 1000 mm/yıl ~ 1.0
+        R_ext  = clamp(maxD / 120.0)   # 120 mm/gün ~ 1.0
+        
+        return W_star, R_ext, maxD, meanA
     except: return 0.5, 0.5, 50.0, 500.0
 
 # ============================================================
@@ -112,23 +116,34 @@ def analyze():
         ndvi = get_ndvi_data(lat, lon, GEE_BUFFER_RADIUS_M)
 
         # 2. HİDROLOJİK HESAPLAR
-        S = clamp(slope_pct / 15.0) # v9.0 AHP Kalibrasyonu
-        
+        S = clamp(slope_pct / 15.0) 
         veg_factor = 1.0 - (ndvi * 0.15) if ndvi > 0.2 else 1.0
-        
         raw_C = 1.0 - K_cover
-        C = clamp(raw_C * soil_factor * veg_factor)
+        C = clamp(raw_C * soil_factor * veg_factor) 
         K_final = 1.0 - C
 
-        # --- v8.9 RİSK MODELİ (BAŞARILI OLDUĞU İÇİN KORUNDU) ---
-        W_blk = 0.6*W_star + 0.4*R_ext
+        # --- v11.0 RİSK MODELİ (ARID PENALTY FIX) ---
+        W_blk = 0.6*W_star + 0.4*R_ext 
         S_risk = abs(2.0*S - 1.0) 
-        Risk_Lin = 0.45*W_blk + 0.45*C + 0.10*S_risk
-        FloodRisk = clamp(Risk_Lin + max(0, R_ext-0.75)*0.4)
-        # --- (Risk Modeli Sonu) ---
+        
+        # 1. Adım: v9.4 Temel Riski (Başarılı olduğu noktalar için)
+        Risk_Lin = 0.45*W_blk + 0.45*C + 0.10*S_risk 
+        Risk_Pik = max(0, R_ext-0.75)*0.4 # Akdeniz ani pik cezası
+        Baseline_Risk = Risk_Lin + Risk_Pik
+
+        # 2. Adım: Yeni "Kurak Kent Seli" Cezası (Başarısız olduğu noktalar için)
+        # (Yıllık Yağış DüşükSE (1.0 - W_star) VE Betonlaşma YüksekSE (C) cezalandır)
+        is_arid_factor = 1.0 - W_star
+        arid_penalty_weight = 0.5 # Kalibrasyon katsayısı
+        Arid_Urban_Penalty = is_arid_factor * C * arid_penalty_weight
+
+        # 3. Adım: Nihai Risk = Temel + Ceza
+        FloodRisk_raw = Baseline_Risk + Arid_Urban_Penalty
+        FloodRisk = clamp(FloodRisk_raw)
+        # --- (v11.0 Risk Modeli Sonu) ---
 
 
-        # --- v9.0 AHP MODELİ (BAŞARILI OLDUĞU İÇİN KORUNDU) ---
+        # --- v9.0 AHP MODELİ (Değişiklik yok, korundu) ---
         S_mid = 1.0 - abs(2.0*S - 1.0)
         
         Sc_DEN = 0.40*S_mid + 0.40*FloodRisk + 0.20*(K_final)
@@ -163,35 +178,26 @@ def analyze():
         else:
             reason_txt = "Bölgedeki karmaşık topografya ve değişken zemin yapısı, birden fazla sistemin özelliklerini taşıyan Hibrit bir çözümü gerektirmektedir."
 
-        # 6. HİDROLİK VE DİĞER HESAPLAR
+        # 6. HİDROLİK (v9.4 - Değişiklik yok, korundu)
         Climate_Factor = 1.15 
         
-        # --- v9.3 MANTIK DÜZELTMESİ (KORUNDU) ---
         n_roughness = 0.025 if selected in ["meandering", "radial"] else 0.013
         
         S_metric = max(0.01, slope_pct / 100.0)
         t_c = max(5.0, min(45.0, 0.0195 * (math.pow(L_flow, 0.77) / math.pow(S_metric, 0.385))))
 
-        # --- DÜZELTME: GÜVENLİ AKILLI HİDROLİK MODEL (v9.4) ---
-        # Standart/Marmara/Ege (İstanbul, Ankara) için YENİ BAZ DEĞER:
         F_iklim = 2.5 
-        
-        if meanRain > 1500: # Karadeniz (Rize) - Baz değerden DÜŞÜK
-            F_iklim = 2.2 
-        elif meanRain < 400: # Kurak (Konya) - Baz değerden YÜKSEK
-            F_iklim = 3.5
-        elif meanRain > 800 and meanRain <= 1500: # Akdeniz (Antalya, Trabzon) - YÜKSEK
-            F_iklim = 3.0
+        if meanRain > 1500: F_iklim = 2.2 
+        elif meanRain < 400: F_iklim = 3.5
+        elif 800 < meanRain <= 1500: F_iklim = 3.0
         
         i_val = (maxRain * F_iklim) / ((t_c/60.0 + 0.15)**0.7)
-        # --- (Düzeltme Sonu) ---
         
         Q_future = (0.278 * C * i_val * analysis_area_km2) * Climate_Factor 
         
         S_bed = max(0.005, S_metric)
         D_mm = (((4**(5/3)) * n_roughness * Q_future) / (math.pi * math.sqrt(S_bed)))**(3/8) * 1000.0
         
-        # --- v9.3 MANTIK DÜZELTMESİ (KORUNDU) ---
         mat = "PVC"
         if selected in ["meandering", "radial"]: mat = "Doğal Taş Kanal"
         elif D_mm >= 500: mat = "Betonarme"
