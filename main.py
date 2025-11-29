@@ -1,10 +1,8 @@
 # ============================================================
-#  BİYOMİMİKRİ DRENAJ SİSTEMİ — TÜBİTAK v11.0 (ARID PENALTY FIX)
-#  Düzeltme (Risk): v9.4 modeli, 10 noktalı testte başarısız oldu (Ankara/Şanlıurfa).
-#                   Model, "Kurak Kent Seli" (Arid Urban Penalty) mantığı
-#                   eklenerek yeniden kalibre edildi.
-#  Düzeltme (AHP): v9.0 AHP modeli (başarılı) korundu.
-#  Düzeltme (Hidrolik): v9.4 Akıllı Hidrolik modeli (başarılı) korundu.
+#  BİYOMİMİKRİ DRENAJ SİSTEMİ — TÜBİTAK v11.1 (WATER BODY FIX)
+#  Düzeltme (Risk): v11.0 "Kurak Kent Cezası" (Arid Penalty) korundu.
+#  Düzeltme (Mantık): Denizin ortası (Su Kütlesi) seçildiğinde 
+#                   analizi durduran v11.1 kontrolü eklendi.
 # ============================================================
 
 from flask import Flask, request, jsonify
@@ -25,7 +23,7 @@ if os.path.exists(KEY_PATH):
     try:
         credentials = ee.ServiceAccountCredentials(SERVICE_ACCOUNT, KEY_PATH)
         ee.Initialize(credentials)
-        print("GEE Başlatıldı (v11.0 - Arid Penalty Fix)")
+        print("GEE Başlatıldı (v11.1 - Water Body Fix)")
     except Exception as e:
         print(f"GEE Hatası: {e}")
 else:
@@ -39,7 +37,7 @@ def get_ndvi_data(lat, lon, buffer_radius_m):
     try:
         point = ee.Geometry.Point([lon, lat])
         area = point.buffer(buffer_radius_m) 
-        s2 = ee.ImageCollection("COPERNICUS/S2_SR") \
+        s2 = ee.ImageCollection("COPERNİCUS/S2_SR") \
             .filterBounds(point) \
             .filterDate('2023-06-01', '2023-09-30') \
             .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 10)) \
@@ -60,6 +58,8 @@ def get_advanced_area_data(lat, lon, buffer_radius_m):
         to_k =     [0.90, 0.80, 0.85, 0.60, 0.15, 0.50, 0.00, 0.00, 0.90, 0.90]
         k_img = dataset.remap(from_cls, to_k, 0.5)
         mean_k = k_img.reduceRegion(ee.Reducer.mean(), area, 10).get("remapped").getInfo() or 0.5
+        
+        # Sınıf 80 = Su Kütlesi
         mode_cls = dataset.reduceRegion(ee.Reducer.mode(), area, 10).get("Map").getInfo()
         land_map = {10:"Ormanlık", 20:"Çalılık", 30:"Çayır/Park", 40:"Tarım", 50:"Kentsel/Beton", 60:"Çıplak", 80:"Su"}
         land_type = land_map.get(mode_cls, "Karma Alan")
@@ -90,8 +90,8 @@ def get_rain_10years(lat, lon):
         meanA = sum(clean) / 10.0
         maxD = max(clean)
         
-        W_star = clamp(meanA / 1000.0) # 1000 mm/yıl ~ 1.0
-        R_ext  = clamp(maxD / 120.0)   # 120 mm/gün ~ 1.0
+        W_star = clamp(meanA / 1000.0) 
+        R_ext  = clamp(maxD / 120.0)   
         
         return W_star, R_ext, maxD, meanA
     except: return 0.5, 0.5, 50.0, 500.0
@@ -112,6 +112,20 @@ def analyze():
 
         # 1. VERİLERİ TOPLA
         K_cover, soil_factor, land_type, soil_desc, slope_pct = get_advanced_area_data(lat, lon, GEE_BUFFER_RADIUS_M)
+
+        # --- v11.1 SU KÜTLESİ KONTROLÜ ---
+        # Eğer arazi tipi "Su" (Sınıf 80) ise, analizi hemen durdur.
+        if land_type == "Su":
+            return jsonify({
+                "status": "water", # Frontend'in yakalaması için özel durum
+                "msg": "Analiz alanı (deniz, göl) bir su kütlesidir. Drenaj analizi yapılamaz.",
+                "location_type": "Su Kütlesi",
+                "selected_system": "water",
+                "FloodRiskLevel": "N/A"
+            })
+        # --- (Kontrol Sonu) ---
+
+        # (Eğer "Su" değilse, kod normal devam eder)
         W_star, R_ext, maxRain, meanRain = get_rain_10years(lat, lon)
         ndvi = get_ndvi_data(lat, lon, GEE_BUFFER_RADIUS_M)
 
@@ -126,18 +140,14 @@ def analyze():
         W_blk = 0.6*W_star + 0.4*R_ext 
         S_risk = abs(2.0*S - 1.0) 
         
-        # 1. Adım: v9.4 Temel Riski (Başarılı olduğu noktalar için)
         Risk_Lin = 0.45*W_blk + 0.45*C + 0.10*S_risk 
-        Risk_Pik = max(0, R_ext-0.75)*0.4 # Akdeniz ani pik cezası
+        Risk_Pik = max(0, R_ext-0.75)*0.4 
         Baseline_Risk = Risk_Lin + Risk_Pik
 
-        # 2. Adım: Yeni "Kurak Kent Seli" Cezası (Başarısız olduğu noktalar için)
-        # (Yıllık Yağış DüşükSE (1.0 - W_star) VE Betonlaşma YüksekSE (C) cezalandır)
         is_arid_factor = 1.0 - W_star
-        arid_penalty_weight = 0.5 # Kalibrasyon katsayısı
+        arid_penalty_weight = 0.5 
         Arid_Urban_Penalty = is_arid_factor * C * arid_penalty_weight
 
-        # 3. Adım: Nihai Risk = Temel + Ceza
         FloodRisk_raw = Baseline_Risk + Arid_Urban_Penalty
         FloodRisk = clamp(FloodRisk_raw)
         # --- (v11.0 Risk Modeli Sonu) ---
