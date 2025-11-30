@@ -76,8 +76,6 @@ def get_advanced_area_data(lat, lon, buffer_radius_m):
         dem = ee.Image("USGS/SRTMGL1_003")
         slope_val = ee.Terrain.slope(dem).reduceRegion(ee.Reducer.mean(), area.buffer(30), 30).get("slope").getInfo()
         slope_pct = float(slope_val) * 1.5 if slope_val else 0.0 
-
-        -
         elevation_result = dem.reduceRegion(ee.Reducer.mean(), area, 30).get("elevation")
         elevation = elevation_result.getInfo()
         elevation = float(elevation) if elevation is not None else 0.0 
