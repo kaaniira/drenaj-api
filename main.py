@@ -139,7 +139,7 @@ def analyze():
         # 2. HİDROLOJİK HESAPLAR
         
      
-        S = clamp(math.log(1 + slope_pct) / math.log(1 + 15.0))
+        S = clamp(math.log(1 + slope_pct) / math.log(1 + 20.0))
         # --- (Düzeltme Sonu) ---
 
       
@@ -218,10 +218,10 @@ def analyze():
         t_c = max(5.0, min(45.0, 0.0195 * (math.pow(L_flow, 0.77) / math.pow(S_metric, 0.385))))
 
         F_iklim = 2.5 
-        if meanRain > 1500: F_iklim = 2.2 
+        if meanRain > 1500: F_iklim = 2.5 
         elif meanRain < 400: F_iklim = 3.5
         elif 800 < meanRain <= 1500: F_iklim = 3.0
-        elif 400 <= meanRain <= 800: F_iklim = 2.5
+        elif 400 <= meanRain <= 800: F_iklim = 3.25
         
         i_val = (maxRain * F_iklim) / ((t_c/60.0 + 0.15)**0.7)
         
