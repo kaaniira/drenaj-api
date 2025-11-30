@@ -1,15 +1,5 @@
 # ============================================================
 #  BİYOMİMİKRİ DRENAJ SİSTEMİ — v11.4 (Kısmi Düzeltme)
-#  KULLANICI TALEBİ: Menderes (Sc_MEA) sistemi ve gerekçesi (reason_txt),
-#                   kullanıcı talebi üzerine orijinal (v11.3) mantığında (bilimsel olarak hatalı) bırakılmıştır.
-#
-#  UYGULANAN DİĞER HAKEM DÜZELTMELERİ:
-#  Düzeltme (Su): v11.4 (Madde 4) - Su tespiti için ESA Sınıf 80 (land_type) eklendi.
-#  Düzeltme (Kirpich): v11.4 (Madde 10) - L_flow (akış uzunluğu) yarıçap yerine çap (200m) olarak düzeltildi.
-#  Düzeltme (Ölçek): v11.4 (Madde 3) - Toprak verisi (soil_mode) 250m buffer yerine 100m alana ve 10m ölçeğe çekildi.
-#  Düzeltme (Risk): v11.4 (Madde 7) - AridPenalty'deki 'C' ile çifte sayım kaldırıldı, ağırlık 0.3'e kalibre edildi.
-#  Düzeltme (Eğim S): v11.4 (Madde 8) - AHP eğim normalizasyonu (S) lineer (slope/15) yerine logaritmik fonksiyona geçirildi.
-#  Düzeltme (NDVI): v11.4 (Madde 5) - veg_factor etkisi 0.15'ten 0.30'a yükseltildi.
 # ============================================================
 
 from flask import Flask, request, jsonify
@@ -41,7 +31,7 @@ def clamp(v, vmin=0.0, vmax=1.0):
 
 # --- 1. NDVI (Bitki) ---
 def get_ndvi_data(lat, lon, buffer_radius_m):
-    # (Bu fonksiyonda değişiklik yok)
+   
     try:
         point = ee.Geometry.Point([lon, lat])
         area = point.buffer(buffer_radius_m) 
@@ -54,8 +44,7 @@ def get_ndvi_data(lat, lon, buffer_radius_m):
         val = ndvi.reduceRegion(ee.Reducer.mean(), area, 10).get('NDVI').getInfo()
         return float(val) if val else 0.0
     except: return 0.0
-
-# --- 2. ALAN VERİLERİ (ESA, SRTM, Toprak) ---
+        
 def get_advanced_area_data(lat, lon, buffer_radius_m):
     try:
         point = ee.Geometry.Point([lon, lat])
@@ -74,12 +63,9 @@ def get_advanced_area_data(lat, lon, buffer_radius_m):
 
         soil_img = ee.Image("OpenLandMap/SOL/SOL_TEXTURE-CLASS_USDA-TT_M/v02").select("b0")
         
-        # --- v11.4 Ölçek Düzeltmesi (Madde 3) ---
-        # 250m buffer ve 250m ölçek kaldırıldı. 
-        # Analiz alanı 'area' (100m) ve ölçek '10m' ile (ESA gibi) eşleştirildi.
+      
         soil_mode = soil_img.reduceRegion(ee.Reducer.mode(), area, 10).get("b0").getInfo()
-        # --- (Düzeltme Sonu) ---
-        
+       
         soil_factor = 1.0
         soil_desc = "Normal Toprak"
         if soil_mode:
@@ -91,7 +77,7 @@ def get_advanced_area_data(lat, lon, buffer_radius_m):
         slope_val = ee.Terrain.slope(dem).reduceRegion(ee.Reducer.mean(), area.buffer(30), 30).get("slope").getInfo()
         slope_pct = float(slope_val) * 1.5 if slope_val else 0.0 
 
-        # --- v11.3 DEĞİŞİKLİK (Korundu) ---
+        -
         elevation_result = dem.reduceRegion(ee.Reducer.mean(), area, 30).get("elevation")
         elevation = elevation_result.getInfo()
         elevation = float(elevation) if elevation is not None else 0.0 
@@ -102,7 +88,7 @@ def get_advanced_area_data(lat, lon, buffer_radius_m):
 
 # --- 3. YAĞIŞ ---
 def get_rain_10years(lat, lon):
-    # (Madde 2) - Bu fonksiyonda değişiklik yok, hesaplama doğru.
+ 
     try:
         url = f"https://archive-api.open-meteo.com/v1/archive?latitude={lat}&longitude={lon}&start_date=2015-01-01&end_date=2024-12-31&daily=precipitation_sum&timezone=UTC"
         r = requests.get(url, timeout=15).json()
@@ -130,14 +116,14 @@ def analyze():
         analysis_area_m2 = math.pi * (GEE_BUFFER_RADIUS_M ** 2.0)
         analysis_area_km2 = analysis_area_m2 / 1000000.0
         
-        # --- v11.4 Kirpich L Düzeltmesi (Madde 10) ---
+        # --- v11.4 Kirpich L Düzeltmesi  ---
         L_flow = GEE_BUFFER_RADIUS_M * 2.0
-        # --- (Düzeltme Sonu) ---
+      
 
         # 1. VERİLERİ TOPLA
         K_cover, soil_factor, land_type, soil_desc, slope_pct, elevation = get_advanced_area_data(lat, lon, GEE_BUFFER_RADIUS_M)
 
-        # --- v11.4 RAKIM + ARAZİ KONTROLÜ (Madde 4 Düzeltmesi) ---
+        # --- v11.4 RAKIM + ARAZİ KONTROLÜ ---
         if elevation <= 0 or land_type == "Su":
             return jsonify({
                 "status": "water", 
@@ -146,18 +132,17 @@ def analyze():
                 "selected_system": "water",
                 "FloodRiskLevel": "N/A"
             })
-        # --- (Düzeltme Sonu) ---
 
         W_star, R_ext, maxRain, meanRain = get_rain_10years(lat, lon)
         ndvi = get_ndvi_data(lat, lon, GEE_BUFFER_RADIUS_M)
 
         # 2. HİDROLOJİK HESAPLAR
         
-        # --- v11.4 Eğim Normalizasyonu Düzeltmesi (Madde 8) ---
+     
         S = clamp(math.log(1 + slope_pct) / math.log(1 + 15.0))
         # --- (Düzeltme Sonu) ---
 
-        # --- v11.4 veg_factor Kalibrasyonu (Madde 5) ---
+      
         veg_factor = 1.0 - (ndvi * 0.30) if ndvi > 0.2 else 1.0
         # --- (Düzeltme Sonu) ---
         
@@ -165,7 +150,6 @@ def analyze():
         C = clamp(raw_C * soil_factor * veg_factor) 
         K_final = 1.0 - C
 
-        # --- v11.4 RİSK MODELİ (ARID PENALTY DÜZELTMESİ) ---
         W_blk = 0.6*W_star + 0.4*R_ext 
         S_risk = abs(2.0*S - 1.0) 
         
@@ -175,17 +159,17 @@ def analyze():
 
         is_arid_factor = 1.0 - W_star
         
-        # --- v11.4 AridPenalty Düzeltmesi (Madde 7) ---
+     
         arid_penalty_weight = 0.3 
         Arid_Urban_Penalty = is_arid_factor * arid_penalty_weight
-        # --- (Düzeltme Sonu) ---
+        
 
         FloodRisk_raw = Baseline_Risk + Arid_Urban_Penalty
         FloodRisk = clamp(FloodRisk_raw)
-        # --- (v11.4 Risk Modeli Sonu) ---
+    
 
 
-        # --- v11.4 AHP MODELİ (MENDERES HARİÇ DÜZELTİLDİ) ---
+        # --- v11.4 AHP MODELİ 
         S_mid = 1.0 - abs(2.0*S - 1.0)
         
         Sc_DEN = 0.40*S_mid + 0.40*FloodRisk + 0.20*(K_final)
@@ -193,14 +177,11 @@ def analyze():
         Sc_RET = 0.80*C + 0.20*FloodRisk
         Sc_PIN = 0.50*S + 0.30*C + 0.20*W_star
         Sc_RAD = 0.70*(1.0-S) + 0.20*K_final + 0.10*FloodRisk
-        
-        # --- v11.4 MENDERES NOTU: KULLANICI TALEBİ ÜZERİNE ORİJİNAL (v11.3) HALİNDE BIRAKILDI ---
-        # Bu formül, yüksek eğimi (S=1) ödüllendirir, düşük eğimi (S=0) cezalandırır.
         Sc_MEA = 0.80*S + 0.20*(1-C)
-        # --- (Değişiklik Sonu) ---
+       
         
         Sc_HYB = 0.35*FloodRisk + 0.35*C + 0.30*S_mid
-        # --- (AHP Modeli Sonu) ---
+        
 
         scores = {
             "dendritic": round(Sc_DEN, 3), "parallel": round(Sc_PAR, 3), "reticular": round(Sc_RET, 3),
@@ -208,7 +189,7 @@ def analyze():
         }
         selected = max(scores, key=scores.get)
 
-        # 5. KARAR AÇIKLAMASI (MENDERES HARİÇ DÜZELTİLDİ)
+        # 5. KARAR AÇIKLAMASI 
         reason_txt = "Bilinmiyor."
         if selected == "dendritic":
             reason_txt = f"Bölgedeki orta seviye eğim (%{slope_pct:.1f}) ve doğal akış hatlarının varlığı, suyu yerçekimiyle toplamak için en verimli olan ağaç dalları (Dendritik) yapısını öne çıkarmıştır."
@@ -221,12 +202,9 @@ def analyze():
         elif selected == "radial":
             reason_txt = f"Arazinin düz yapısı (%{slope_pct:.1f} eğim) ve geçirgen zemini (K={K_final:.2f}), suyun merkezi bir yağmur bahçesi topladığı (Radyal) sistemi gerektirir."
         
-        # --- v11.4 MENDERES NOTU: KULLANICI TALEBİ ÜZERİNE ORİJİNAL (v11.3) HALİNDE BIRAKILDI ---
-        # Bu gerekçe, hatalı AHP formülüne uygun olarak "çok dik eğim" uyarısı verir.
+       
         elif selected == "meandering":
             reason_txt = f"UYARI: Bölgedeki çok dik eğim (%{slope_pct:.1f}), suyun hızını ve erozyon riskini artırmaktadır. Bu nedenle suyu yavaşlatarak taşıyan kıvrımlı (Menderes) yapı seçilmiştir."
-        # --- (Değişiklik Sonu) ---
-        
         else:
             reason_txt = "Bölgedeki karmaşık topografya ve değişken zemin yapısı, birden fazla sistemin özelliklerini taşıyan Hibrit bir çözümü gerektirmektedir."
 
@@ -243,6 +221,7 @@ def analyze():
         if meanRain > 1500: F_iklim = 2.2 
         elif meanRain < 400: F_iklim = 3.5
         elif 800 < meanRain <= 1500: F_iklim = 3.0
+        elif 400 <= meanRain <= 800: F_iklim = 2.5
         
         i_val = (maxRain * F_iklim) / ((t_c/60.0 + 0.15)**0.7)
         
