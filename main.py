@@ -137,7 +137,7 @@ def analyze():
         # 2. HİDROLOJİK HESAPLAR
         
      
-        S = clamp(math.log(1 + slope_pct) / math.log(1 + 20.0))
+        S = clamp(slope_pct / 20.0)
         # --- (Düzeltme Sonu) ---
 
       
