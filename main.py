@@ -1,5 +1,5 @@
 # ============================================================
-#  BİYOMİMİKRİ DRENAJ SİSTEMİ — v12.1 (Cloud Run / 10m High Precision)
+#  BİYOMİMİKRİ DRENAJ SİSTEMİ — v13.0 (Dynamic Mode: Point/Line)
 # ============================================================
 
 from flask import Flask, request, jsonify
@@ -13,105 +13,74 @@ import google.auth
 app = Flask(__name__)
 CORS(app)
 
-# --- 1. YARDIMCI FONKSİYONLAR ---
+# --- YARDIMCI VE BAŞLATMA ---
 def clamp(v, vmin=0.0, vmax=1.0):
     return max(vmin, min(vmax, v))
 
-# --- 2. GEE YETKİLENDİRME (CLOUD RUN ADC) ---
 def initialize_gee():
     try:
         credentials, project = google.auth.default(
             scopes=['https://www.googleapis.com/auth/earthengine', 'https://www.googleapis.com/auth/cloud-platform']
         )
         ee.Initialize(credentials, project=project)
-        print("GEE Başlatıldı (10m Hassasiyet - Cloud Run ADC)")
+        print("GEE Başlatıldı (v13 - Dynamic Geometry)")
     except Exception as e:
         print(f"GEE Başlatma Hatası: {e}")
 
 initialize_gee()
 
-# ------------------------------------------------------------
-#  TÜRKİYE SINIR KONTROLÜ + IDF FONKSİYONLARI
-# ------------------------------------------------------------
+# --- VERİ ÇEKME FONKSİYONLARI (Geometri Bağımsız) ---
 
-def is_in_turkey(lat, lon):
-    return (35.5 <= lat <= 42.5) and (25.0 <= lon <= 45.0)
-
-IDF_B_MGM = 0.54       
-IDF_GLOBAL_SCALE = 0.12 
-
-def idf_intensity_turkey(maxRain_24h_mm, t_c_minutes):
-    t_h = max(t_c_minutes / 60.0, 0.1)
-    b = IDF_B_MGM
-    a_local = maxRain_24h_mm / (24.0 ** (1.0 - b))
-    i_val = a_local * (t_h ** (-b))
-    return i_val
-
-def idf_intensity_global_old(maxRain_mm, F_iklim, t_c_minutes):
-    t_h = max(t_c_minutes / 60.0, 0.1)
-    i_old = (maxRain_mm * F_iklim) / ((t_h + 0.15) ** 0.7)
-    return IDF_GLOBAL_SCALE * i_old
-
-
-# --- 3. HARİTA VERİLERİ (10 METRE HASSASİYETLİ) ---
-
-def get_ndvi_data(lat, lon, buffer_radius_m):
+def get_ndvi_data(geometry):
     try:
-        point = ee.Geometry.Point([lon, lat])
-        area = point.buffer(buffer_radius_m)
+        # Tarih aralığı dinamik olabilir, şimdilik sabit
         s2 = (
             ee.ImageCollection("COPERNICUS/S2_SR")
-            .filterBounds(point)
+            .filterBounds(geometry)
             .filterDate("2023-06-01", "2023-09-30")
             .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 10))
             .median()
         )
         ndvi = s2.normalizedDifference(["B8", "B4"]).rename("NDVI")
         
-        # NDVI için de scale 10 yapıldı
-        val = ndvi.reduceRegion(ee.Reducer.mean(), area, 10).get("NDVI").getInfo()
+        val = ndvi.reduceRegion(ee.Reducer.mean(), geometry, 10).get("NDVI").getInfo()
         return float(val) if val else 0.0
     except Exception:
         return 0.0
 
-def get_advanced_area_data(lat, lon, buffer_radius_m):
+def get_advanced_area_data(geometry):
     """
-    Veriler tek seferde çekilir ama scale=10m kullanılarak
-    maksimum topografik hassasiyet sağlanır.
+    Artık lat/lon yerine doğrudan EE Geometry nesnesi alıyor.
+    Böylece hem daire (buffer) hem koridor (line buffer) için çalışır.
     """
     try:
-        point = ee.Geometry.Point([lon, lat])
-        area = point.buffer(buffer_radius_m)
-
-        # A. Veri Setlerini Hazırla
+        # 1. Hazırla
         dataset = ee.ImageCollection("ESA/WorldCover/v200").first()
         from_cls = [10, 20, 30, 40, 50, 60, 80, 90, 95, 100]
         to_k = [0.90, 0.80, 0.85, 0.60, 0.15, 0.50, 0.00, 0.00, 0.90, 0.90]
         k_img = dataset.remap(from_cls, to_k, 0.5).rename("k_value")
         land_cls_img = dataset.rename("land_class")
-
         soil_img = ee.Image("OpenLandMap/SOL/SOL_TEXTURE-CLASS_USDA-TT_M/v02").select("b0").rename("soil_type")
-
         dem = ee.Image("USGS/SRTMGL1_003")
         elev_img = dem.select("elevation").rename("elevation")
         slope_img = ee.Terrain.slope(dem).rename("slope")
 
-        # B. Birleştir (Stacking)
+        # 2. Birleştir
         combined = ee.Image.cat([k_img, land_cls_img, soil_img, slope_img, elev_img])
 
-        # C. Tek seferde iste (10 METRE HASSASİYET)
+        # 3. İste (Scale 10m)
         stats = combined.reduceRegion(
             reducer=ee.Reducer.mean(), 
-            geometry=area, 
-            scale=10,        # <-- BURASI 10 METRE OLDU
-            bestEffort=True, # Eğer alan çok büyükse GEE otomatik optimize eder
+            geometry=geometry, 
+            scale=10, 
+            bestEffort=True,
             maxPixels=1e9
         ).getInfo()
 
         if not stats:
             return 0.5, 1.0, "Bilinmiyor", "Bilinmiyor", 0.0, 0.0
 
-        # D. Verileri Çözümle
+        # 4. Parse Et
         mean_k = float(stats.get("k_value", 0.5))
         slope_val = float(stats.get("slope", 0.0))
         elev_val = float(stats.get("elevation", 0.0))
@@ -119,108 +88,106 @@ def get_advanced_area_data(lat, lon, buffer_radius_m):
         land_cls_val = round(stats.get("land_class", 0))
         soil_cls_val = round(stats.get("soil_type", 0))
 
-        # E. Sözel Açıklamalar
-        land_map = {
-            10: "Ormanlık", 20: "Çalılık", 30: "Çayır/Park",
-            40: "Tarım", 50: "Kentsel/Beton", 60: "Çıplak", 80: "Su"
-        }
+        land_map = {10: "Ormanlık", 20: "Çalılık", 30: "Çayır/Park", 40: "Tarım", 50: "Kentsel/Beton", 60: "Çıplak", 80: "Su"}
         land_key = int(round(land_cls_val / 10.0) * 10)
         land_type = land_map.get(land_key, "Karma Alan")
 
-        soil_factor = 1.0
-        soil_desc = "Normal Toprak"
-        if soil_cls_val in [1, 2, 3]:
-            soil_factor, soil_desc = 1.25, "Killi (Geçirimsiz)"
-        elif soil_cls_val in [9, 10, 11, 12]:
-            soil_factor, soil_desc = 0.85, "Kumlu (Geçirgen)"
+        soil_factor, soil_desc = 1.0, "Normal Toprak"
+        if soil_cls_val in [1, 2, 3]: soil_factor, soil_desc = 1.25, "Killi (Geçirimsiz)"
+        elif soil_cls_val in [9, 10, 11, 12]: soil_factor, soil_desc = 0.85, "Kumlu (Geçirgen)"
 
         slope_pct = slope_val * 1.5
-
         return mean_k, soil_factor, land_type, soil_desc, slope_pct, elev_val
 
     except Exception as e:
         print(f"GEE Fetch Error: {e}")
         return 0.5, 1.0, "Hata", "Hata", 0.0, 0.0
 
-
-# --- 4. YAĞIŞ VERİSİ ---
 def get_rain_10years(lat, lon):
+    # Yağış verisi için tek bir merkez koordinata ihtiyacımız var (Open-Meteo için)
     try:
-        url = (
-            "https://archive-api.open-meteo.com/v1/archive?"
-            f"latitude={lat}&longitude={lon}"
-            "&start_date=2015-01-01&end_date=2024-12-31"
-            "&daily=precipitation_sum&timezone=UTC"
-        )
+        url = f"https://archive-api.open-meteo.com/v1/archive?latitude={lat}&longitude={lon}&start_date=2015-01-01&end_date=2024-12-31&daily=precipitation_sum&timezone=UTC"
         r = requests.get(url, timeout=5).json()
-        if "daily" not in r or "precipitation_sum" not in r["daily"]:
-             return 0.5, 0.5, 50.0, 500.0
-             
-        clean = [d for d in r["daily"]["precipitation_sum"] if d is not None]
-        if not clean:
-            return 0.5, 0.5, 50.0, 500.0
-            
+        clean = [d for d in r.get("daily", {}).get("precipitation_sum", []) if d is not None]
+        
+        if not clean: return 0.5, 0.5, 50.0, 500.0
         meanA = sum(clean) / 10.0   
-        maxD = max(clean)           
-
-        W_star = clamp(meanA / 1000.0)
-        R_ext = clamp(maxD / 120.0)
-
-        return W_star, R_ext, maxD, meanA
+        maxD = max(clean)
+        return clamp(meanA / 1000.0), clamp(maxD / 120.0), maxD, meanA
     except Exception:
         return 0.5, 0.5, 50.0, 500.0
 
-
-# ============================================================
-#  ANA ANALİZ (Mantık Değişmedi)
-# ============================================================
+# --- ANALİZ ---
 @app.route("/analyze", methods=["POST"])
 def analyze():
     try:
         d = request.get_json(force=True)
-        lat, lon = float(d["lat"]), float(d["lon"])
+        
+        # PARAMETRELER
+        mode = d.get("mode", "point") # 'point' veya 'line'
+        radius = float(d.get("radius", 100.0))
+        
+        # Geometri Oluşturma
+        ee_geometry = None
+        center_lat, center_lon = 0, 0
+        
+        if mode == "line":
+            # Hat Modu: İki nokta arası çizgi ve buffer
+            start = d["start"] # {lat, lon}
+            end = d["end"]     # {lat, lon}
+            line = ee.Geometry.LineString([[start["lon"], start["lat"]], [end["lon"], end["lat"]]])
+            ee_geometry = line.buffer(radius) # Hat boyunca koridor
+            
+            # Hava durumu için orta noktayı bul
+            center_lat = (start["lat"] + end["lat"]) / 2.0
+            center_lon = (start["lon"] + end["lon"]) / 2.0
+            
+            # Alan Hesabı (Dikdörtgen benzeri)
+            # Kabaca: Uzunluk * Genişlik (2*radius)
+            length = line.length().getInfo() # metre
+            analysis_area_m2 = length * (radius * 2) 
 
-        GEE_BUFFER_RADIUS_M = 100.0
-        analysis_area_m2 = math.pi * (GEE_BUFFER_RADIUS_M ** 2.0)
+        else:
+            # Nokta Modu: Daire
+            lat, lon = float(d["lat"]), float(d["lon"])
+            center_lat, center_lon = lat, lon
+            pt = ee.Geometry.Point([lon, lat])
+            ee_geometry = pt.buffer(radius)
+            analysis_area_m2 = math.pi * (radius ** 2.0)
+
         analysis_area_km2 = analysis_area_m2 / 1_000_000.0
-        L_flow = GEE_BUFFER_RADIUS_M * 2.0
+        
+        # Akış uzunluğu (Kirpich için)
+        if mode == "line":
+             # Hat modunda akış uzunluğu hattın kendi uzunluğudur (veya eğime göre değişir ama hattı baz alıyoruz)
+             L_flow = math.sqrt((start["lat"]-end["lat"])**2 + (start["lon"]-end["lon"])**2) * 111000 
+        else:
+             L_flow = radius * 2.0
 
-        K_cover, soil_factor, land_type, soil_desc, slope_pct, elevation = (
-            get_advanced_area_data(lat, lon, GEE_BUFFER_RADIUS_M)
-        )
+        # --- VERİLERİ TOPLA ---
+        K_cover, soil_factor, land_type, soil_desc, slope_pct, elevation = get_advanced_area_data(ee_geometry)
 
+        # Su Kontrolü
         if elevation <= 0 or land_type == "Su":
-            return jsonify({
-                "status": "water",
-                "msg": "Analiz alanı su kütlesidir.",
-                "location_type": f"Su (Rakım: {elevation:.1f}m)",
-                "selected_system": "water",
-                "FloodRiskLevel": "N/A",
-            })
+            return jsonify({"status": "water", "msg": "Su kütlesi.", "location_type": "Su", "selected_system": "water", "FloodRiskLevel": "N/A"})
 
-        W_star, R_ext, maxRain, meanRain = get_rain_10years(lat, lon)
-        ndvi = get_ndvi_data(lat, lon, GEE_BUFFER_RADIUS_M)
+        W_star, R_ext, maxRain, meanRain = get_rain_10years(center_lat, center_lon)
+        ndvi = get_ndvi_data(ee_geometry)
 
+        # --- HESAPLAMALAR (Aynı Mantık) ---
         S = clamp(slope_pct / 20.0)
         veg_factor = 1.0 - (ndvi * 0.30) if ndvi > 0.2 else 1.0
-
         raw_C = 1.0 - K_cover
         C = clamp(raw_C * soil_factor * veg_factor)
         K_final = 1.0 - C
 
         W_blk = 0.6 * W_star + 0.4 * R_ext
         S_risk = abs(2.0 * S - 1.0)
+        Baseline_Risk = (0.45 * W_blk + 0.45 * C + 0.10 * S_risk) + max(0, R_ext - 0.75) * 0.4
+        FloodRisk = clamp(Baseline_Risk + (1.0 - W_star) * 0.3)
 
-        Risk_Lin = 0.45 * W_blk + 0.45 * C + 0.10 * S_risk
-        Risk_Pik = max(0, R_ext - 0.75) * 0.4
-        Baseline_Risk = Risk_Lin + Risk_Pik
-
-        is_arid_factor = 1.0 - W_star
-        Arid_Urban_Penalty = is_arid_factor * 0.3
-        FloodRisk = clamp(Baseline_Risk + Arid_Urban_Penalty)
-
+        # Sistem Seçimi
         S_mid = 1.0 - abs(2.0 * S - 1.0)
-
         scores = {
             "dendritic": round(0.40 * S_mid + 0.40 * FloodRisk + 0.20 * K_final, 3),
             "parallel": round(0.50 * S + 0.30 * K_final + 0.20 * (1 - FloodRisk), 3),
@@ -232,54 +199,52 @@ def analyze():
         }
         selected = max(scores, key=scores.get)
 
-        reasons = {
-            "dendritic": f"Orta eğim (%{slope_pct:.1f}) ve doğal akış hatları Dendritik yapıyı öne çıkarıyor.",
-            "parallel": f"Düzenli ve tek yönlü eğim (%{slope_pct:.1f}), paralel tahliyeyi gerektiriyor.",
-            "reticular": f"Yüksek geçirimsizlik (K={K_final:.2f}) ve kentsel doku ağsı yapıyı gerektiriyor.",
-            "pinnate": f"Dik eğim (%{slope_pct:.1f}) suyu hızlı tahliye etmek için balık kılçığı modelini seçtirdi.",
-            "radial": f"Düz arazi (%{slope_pct:.1f}) ve geçirgen zemin, suyu merkezi toplamaya uygun.",
-            "meandering": f"Yüksek eğimde (%{slope_pct:.1f}) erozyonu önlemek için kıvrımlı yapı seçildi.",
-            "hybrid": "Karmaşık topografya hibrit çözüm gerektiriyor."
-        }
-        reason_txt = reasons.get(selected, "Karmaşık yapı.")
-
-        Climate_Factor = 1.15
-        n_roughness = 0.025 if selected in ["meandering", "radial"] else 0.013
+        # Hidrolik
         S_metric = max(0.01, slope_pct / 100.0)
+        t_c = max(5.0, min(45.0, 0.0195 * (math.pow(L_flow, 0.77) / math.pow(S_metric, 0.385))))
         
-        t_c_raw = 0.0195 * (math.pow(L_flow, 0.77) / math.pow(S_metric, 0.385))
-        t_c = max(5.0, min(45.0, t_c_raw))
-
+        # IDF
         F_iklim = 3.0
         if meanRain > 1500: F_iklim = 2.5
         elif meanRain < 400: F_iklim = 3.5
-
-        if is_in_turkey(lat, lon):
-            i_val = idf_intensity_turkey(maxRain, t_c)
+        
+        # Basit Global/Local Ayrımı
+        is_turkey = (35.5 <= center_lat <= 42.5) and (25.0 <= center_lon <= 45.0)
+        if is_turkey:
+             i_val = (maxRain / (24.0 ** (1.0 - 0.54))) * ((max(t_c/60.0, 0.1)) ** (-0.54))
         else:
-            i_val = idf_intensity_global_old(maxRain, F_iklim, t_c)
+             i_old = (maxRain * F_iklim) / ((max(t_c/60.0, 0.1) + 0.15) ** 0.7)
+             i_val = 0.12 * i_old
 
-        Q_future = (0.278 * C * i_val * analysis_area_km2) * Climate_Factor
+        Q_future = (0.278 * C * i_val * analysis_area_km2) * 1.15
+        n_rough = 0.025 if selected in ["meandering", "radial"] else 0.013
+        D_mm = (((4**(5/3)) * n_rough * Q_future) / (math.pi * math.sqrt(max(0.005, S_metric))))**(3/8) * 1000.0
 
-        S_bed = max(0.005, S_metric)
-        D_mm = (((4 ** (5 / 3)) * n_roughness * Q_future) / (math.pi * math.sqrt(S_bed))) ** (3 / 8) * 1000.0
-
+        # Ek Açıklamalar
         mat = "PVC"
         if selected in ["meandering", "radial"]: mat = "Doğal Taş Kanal"
         elif D_mm >= 500: mat = "Betonarme"
         elif D_mm >= 200: mat = "Koruge (HDPE)"
-
-        bio_solutions = {
-            "radial": "Yağmur Bahçesi (Rain Garden)",
-            "dendritic": "Biyo-Hendek (Bioswale)"
+        
+        reasons = {
+            "dendritic": f"Eğim (%{slope_pct:.1f}) ve vadi yapısı, suyu doğal akışla toplamayı öneriyor.",
+            "parallel": f"Tek yönlü düzenli eğim (%{slope_pct:.1f}), paralel tahliye gerektiriyor.",
+            "reticular": f"Yüksek geçirimsizlik (K={K_final:.2f}) ve şehir dokusu ağsı yapıyı zorunlu kılıyor.",
+            "pinnate": f"Dar alan ve eğim (%{slope_pct:.1f}) balık kılçığı modelini öne çıkardı.",
+            "radial": "Merkezi toplanma için uygun topografya.",
+            "meandering": "Yüksek eğimde hızı kırmak için kıvrımlı yapı.",
+            "hybrid": "Karmaşık arazi hibrit çözüm gerektiriyor."
         }
-        bio_solution = bio_solutions.get(selected, "Standart Peyzaj")
-        if C > 0.7: bio_solution = "Yeşil Çatı & Geçirimli Beton"
-        elif slope_pct > 15: bio_solution = "Teraslama & Erozyon Önleyici"
 
         harvest = analysis_area_m2 * (meanRain / 1000.0) * 0.85 * (1.0 - K_final)
-        lvl_idx = min(int(FloodRisk * 4.9), 4)
-        lvl = ["Çok Düşük", "Düşük", "Orta", "Yüksek", "Kritik"][lvl_idx]
+        lvl = ["Çok Düşük", "Düşük", "Orta", "Yüksek", "Kritik"][min(int(FloodRisk*4.9), 4)]
+
+        # Yeşil Altyapı
+        bio_solution = "Standart Peyzaj"
+        if C > 0.7: bio_solution = "Yeşil Çatı & Geçirimli Beton"
+        elif slope_pct > 15: bio_solution = "Teraslama"
+        elif selected == "radial": bio_solution = "Yağmur Bahçesi"
+        elif selected == "dendritic": bio_solution = "Biyo-Hendek"
 
         return jsonify({
             "status": "success",
@@ -290,14 +255,15 @@ def analyze():
             "FloodRisk": round(FloodRisk, 2),
             "FloodRiskLevel": lvl,
             "selected_system": selected,
-            "system_reasoning": reason_txt,
+            "system_reasoning": reasons.get(selected, "Analiz edildi."),
             "scores": scores,
             "pipe_diameter_mm": round(D_mm, 0),
             "material": mat,
             "Q_flow": round(Q_future, 3),
             "rain_stats": {"mean": round(meanRain, 1), "max": round(maxRain, 1)},
             "eco_stats": {"harvest": round(harvest, 0), "bio_solution": bio_solution},
-            "debug_i_val": round(i_val, 2)
+            "debug_analysis_area_ha": round(analysis_area_m2/10000.0, 2),
+            "mode": mode
         })
 
     except Exception as e:
