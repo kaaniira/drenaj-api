@@ -3,7 +3,7 @@
 # ============================================================
 
 from flask import Flask, request, jsonify
-from flask_cors import CORS
+from flask_cors import CORS # Bu kütüphanenin yüklü olduğundan emin olun
 import requests
 import math
 import ee
@@ -11,7 +11,14 @@ import os
 import google.auth
 
 app = Flask(__name__)
-CORS(app)
+
+# --- CORS AYARI (GÜNCELLENMİŞ) ---
+# allow_headers: Content-Type gibi başlıkların geçmesine izin verir
+# origins: "*" diyerek her yerden gelen isteği kabul eder (Localhost ve great-site.net dahil)
+CORS(app, resources={r"/*": {"origins": "*"}}, 
+     supports_credentials=True, 
+     allow_headers=["Content-Type", "Authorization"], 
+     methods=["GET", "POST", "OPTIONS"])
 
 # --- YARDIMCI VE BAŞLATMA ---
 def clamp(v, vmin=0.0, vmax=1.0):
