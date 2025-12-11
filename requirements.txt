@@ -10,3 +10,4 @@ pyproj
 Pillow
 numpy
 earthengine-api
+google-auth
