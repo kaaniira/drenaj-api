@@ -13,25 +13,29 @@ app = Flask(__name__)
 CORS(app)
 
 # --- GEE YETKİLENDİRME ---
-import os
+import google.auth
 
-SERVICE_ACCOUNT = os.getenv("SERVICE_ACCOUNT", "earthengine-service@drenaj-v6.iam.gserviceaccount.com")
-KEY_PATH = os.getenv("EE_KEY_PATH", "/etc/secrets/service-account.json")
-
-
-if os.path.exists(KEY_PATH):
+def initialize_gee():
     try:
-        credentials = ee.ServiceAccountCredentials(SERVICE_ACCOUNT, KEY_PATH)
-        ee.Initialize(credentials)
-        print("GEE Başlatıldı (v11.5 - IDF Kalibre)")
+        # 1. YÖNTEM: Cloud Run Ortamında Otomatik Kimlik (En Sağlıklısı)
+        # Bu yöntem Cloud Run'a tanımladığınız Service Account'u otomatik algılar.
+        # JSON dosyası aramaz, ortam değişkenlerini kullanır.
+        credentials, project = google.auth.default(
+            scopes=['https://www.googleapis.com/auth/earthengine', 'https://www.googleapis.com/auth/cloud-platform']
+        )
+        
+        ee.Initialize(credentials, project=project)
+        print("GEE Başlatıldı (Cloud Run ADC Yöntemi)")
+        
     except Exception as e:
-        print(f"GEE Hatası: {e}")
-else:
-    print("UYARI: GEE Key yok.")
+        print(f"GEE Başlatma Hatası: {e}")
+        # İsterseniz burada eski JSON yöntemini 'try-except' içinde yedek olarak tutabilirsiniz
+        # ama Cloud Run için yukarıdaki yeterlidir.
+
+# Uygulama başlarken çalıştır
+initialize_gee()
 
 
-def clamp(v, vmin=0.0, vmax=1.0):
-    return max(vmin, min(vmax, v))
 
 
 # ------------------------------------------------------------
