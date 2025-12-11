@@ -13,8 +13,11 @@ app = Flask(__name__)
 CORS(app)
 
 # --- GEE YETKİLENDİRME ---
-SERVICE_ACCOUNT = "earthengine-service@drenaj-v6.iam.gserviceaccount.com"
-KEY_PATH = "/etc/secrets/service-account.json"
+import os
+
+SERVICE_ACCOUNT = os.getenv("SERVICE_ACCOUNT", "earthengine-service@drenaj-v6.iam.gserviceaccount.com")
+KEY_PATH = os.getenv("EE_KEY_PATH", "/etc/secrets/service-account.json")
+
 
 if os.path.exists(KEY_PATH):
     try:
