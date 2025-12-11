@@ -1,5 +1,5 @@
 # ============================================================
-#  BİYOMİMİKRİ DRENAJ SİSTEMİ — v14.0 (TURBO & DYNAMIC SCALE)
+#  BİYOMİMİKRİ DRENAJ SİSTEMİ — v15.1 (10M HIGH PRECISION)
 # ============================================================
 
 from flask import Flask, request, jsonify, make_response
@@ -10,11 +10,12 @@ import ee
 import os
 import google.auth
 import logging
+from concurrent.futures import ThreadPoolExecutor
 
 logging.basicConfig(level=logging.INFO)
 app = Flask(__name__)
 
-# CORS: Her yerden erişime izin ver
+# CORS
 CORS(app, resources={r"/*": {"origins": "*"}})
 
 @app.after_request
@@ -24,6 +25,7 @@ def after_request(response):
     response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
     return response
 
+# GEE Başlatma
 def initialize_gee():
     try:
         credentials, project = google.auth.default(
@@ -39,14 +41,13 @@ initialize_gee()
 def clamp(v, vmin=0.0, vmax=1.0):
     return max(vmin, min(vmax, v))
 
-# --- OPTİMİZE EDİLMİŞ VERİ ÇEKME ---
-def get_all_map_data(geometry, scale_val):
+# --- GEE VERİ ÇEKME (THREAD İÇİNDE) ---
+def get_gee_data_task(geometry):
     """
-    scale_val parametresi ile çözünürlüğü dinamik ayarlar.
-    Line modunda 30m, Point modunda 10m çalışır.
+    Ölçek 10m olarak sabitlendi.
+    Büyük alanlarda hata vermemesi için tileScale=8 yapıldı.
     """
     try:
-        # 1. Görüntüleri Hazırla (Lazy Evaluation - Henüz işlem yapmaz)
         s2 = (ee.ImageCollection("COPERNICUS/S2_SR")
               .filterBounds(geometry)
               .filterDate("2023-06-01", "2023-09-30")
@@ -55,62 +56,61 @@ def get_all_map_data(geometry, scale_val):
         ndvi_img = s2.normalizedDifference(["B8", "B4"]).rename("ndvi")
 
         dataset = ee.ImageCollection("ESA/WorldCover/v200").first()
-        from_cls = [10, 20, 30, 40, 50, 60, 80, 90, 95, 100]
-        to_k = [0.90, 0.80, 0.85, 0.60, 0.15, 0.50, 0.00, 0.00, 0.90, 0.90]
-        k_img = dataset.remap(from_cls, to_k, 0.5).rename("k_value")
+        k_img = dataset.remap(
+            [10, 20, 30, 40, 50, 60, 80, 90, 95, 100], 
+            [0.90, 0.80, 0.85, 0.60, 0.15, 0.50, 0.00, 0.00, 0.90, 0.90], 
+            0.5
+        ).rename("k_value")
         land_cls_img = dataset.rename("land_class")
 
         soil_img = ee.Image("OpenLandMap/SOL/SOL_TEXTURE-CLASS_USDA-TT_M/v02").select("b0").rename("soil_type")
-        
         dem = ee.Image("USGS/SRTMGL1_003")
-        elev_img = dem.select("elevation").rename("elevation")
-        slope_img = ee.Terrain.slope(dem).rename("slope")
-
-        # 2. Hepsini Paketle
-        combined = ee.Image.cat([ndvi_img, k_img, land_cls_img, soil_img, slope_img, elev_img])
         
-        # 3. Sunucuya Gönder (CRITICAL STEP)
-        # bestEffort=True: Eğer alan çok büyükse ve 30m yetmezse, GEE otomatik olarak ölçeği büyütüp hata vermeden cevap döner.
+        combined = ee.Image.cat([
+            ndvi_img, k_img, land_cls_img, soil_img, 
+            ee.Terrain.slope(dem).rename("slope"), 
+            dem.select("elevation").rename("elevation")
+        ])
+        
+        # --- HASSASİYET AYARI: 10 METRE ---
         stats = combined.reduceRegion(
             reducer=ee.Reducer.mean(), 
             geometry=geometry, 
-            scale=scale_val, 
+            scale=10,       # <-- İSTEĞİNİZ ÜZERİNE 10m SABİTLENDİ
             bestEffort=True, 
-            maxPixels=1e9
+            maxPixels=1e9,
+            tileScale=8     # 10m işlemciyi yorar, bunu artırarak belleği rahatlatıyoruz
         ).getInfo()
 
-        if not stats: 
-            return 0.0, 0.5, 1.0, "Bilinmiyor", "Bilinmiyor", 0.0, 0.0
+        if not stats: return None
 
-        # 4. Sonuçları İşle
-        ndvi_val = float(stats.get("ndvi", 0.0))
-        mean_k = float(stats.get("k_value", 0.5))
-        slope_val = float(stats.get("slope", 0.0))
-        elev_val = float(stats.get("elevation", 0.0))
-        land_cls_val = round(stats.get("land_class", 0))
-        soil_cls_val = round(stats.get("soil_type", 0))
-
-        land_map = {10: "Ormanlık", 20: "Çalılık", 30: "Çayır/Park", 40: "Tarım", 50: "Kentsel/Beton", 60: "Çıplak", 80: "Su"}
-        land_type = land_map.get(int(round(land_cls_val/10)*10), "Karma Alan")
-        
-        soil_factor, soil_desc = 1.0, "Normal Toprak"
-        if soil_cls_val in [1, 2, 3]: soil_factor, soil_desc = 1.25, "Killi (Geçirimsiz)"
-        elif soil_cls_val in [9, 10, 11, 12]: soil_factor, soil_desc = 0.85, "Kumlu (Geçirgen)"
-        
-        return ndvi_val, mean_k, soil_factor, land_type, soil_desc, slope_val * 1.5, elev_val
+        return {
+            "ndvi": float(stats.get("ndvi", 0.0)),
+            "k": float(stats.get("k_value", 0.5)),
+            "slope": float(stats.get("slope", 0.0)),
+            "elev": float(stats.get("elevation", 0.0)),
+            "land": round(stats.get("land_class", 0)),
+            "soil": round(stats.get("soil_type", 0))
+        }
 
     except Exception as e:
-        logging.error(f"GEE Data Hatası: {e}")
-        return 0.0, 0.5, 1.0, "Hata", "Hata", 0.0, 0.0
+        logging.error(f"GEE Task Hatası: {e}")
+        return None
 
-def get_rain_10years(lat, lon):
+# --- YAĞMUR VERİSİ ---
+def get_weather_data_task(lat, lon):
     try:
         url = f"https://archive-api.open-meteo.com/v1/archive?latitude={lat}&longitude={lon}&start_date=2015-01-01&end_date=2024-12-31&daily=precipitation_sum&timezone=UTC"
-        r = requests.get(url, timeout=4).json() # Timeout düşürüldü
+        r = requests.get(url, timeout=5).json()
         clean = [d for d in r.get("daily", {}).get("precipitation_sum", []) if d is not None]
+        
         if not clean: return 0.5, 0.5, 50.0, 500.0
-        return clamp(sum(clean)/10000.0), clamp(max(clean)/120.0), max(clean), sum(clean)/10.0
-    except Exception:
+        
+        meanA = sum(clean) / 10.0
+        maxD = max(clean)
+        return clamp(meanA/1000.0), clamp(maxD/120.0), maxD, meanA
+    except Exception as e:
+        logging.error(f"Weather Task Hatası: {e}")
         return 0.5, 0.5, 50.0, 500.0
 
 @app.route("/analyze", methods=["POST", "OPTIONS"])
@@ -122,20 +122,15 @@ def analyze():
         d = request.get_json(force=True)
         mode = d.get("mode", "point")
         radius = float(d.get("radius", 100.0))
-        
-        # --- DİNAMİK ÖLÇEK AYARI ---
-        # Line (Hat) modu çok geniş alan taradığı için 30m kullanıyoruz.
-        # Point (Nokta) modu küçük olduğu için 10m hassas tarıyoruz.
-        dynamic_scale = 10 if mode == "point" else 30
 
+        # --- GEOMETRİ HAZIRLIĞI ---
         if mode == "line":
             start, end = d["start"], d["end"]
             line = ee.Geometry.LineString([[start["lon"], start["lat"]], [end["lon"], end["lat"]]])
             ee_geometry = line.buffer(radius)
             center_lat, center_lon = (start["lat"] + end["lat"])/2.0, (start["lon"] + end["lon"])/2.0
-            length_m = line.length().getInfo()
-            analysis_area_m2 = length_m * (radius * 2)
-            L_flow = length_m
+            L_flow = line.length().getInfo() 
+            analysis_area_m2 = L_flow * (radius * 2)
         else:
             lat, lon = float(d["lat"]), float(d["lon"])
             center_lat, center_lon = lat, lon
@@ -143,15 +138,38 @@ def analyze():
             analysis_area_m2 = math.pi * (radius ** 2.0)
             L_flow = radius * 2.0
 
-        # Verileri Çek
-        ndvi, K_cover, soil_factor, land_type, soil_desc, slope_pct, elevation = get_all_map_data(ee_geometry, dynamic_scale)
-        
+        # --- PARALEL İŞLEME (HIZ İÇİN) ---
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            future_gee = executor.submit(get_gee_data_task, ee_geometry) # Scale artık fonk. içinde 10 sabit
+            future_weather = executor.submit(get_weather_data_task, center_lat, center_lon)
+
+            gee_res = future_gee.result()
+            weather_res = future_weather.result()
+
+        # Veri Atama
+        if not gee_res:
+            ndvi, K_cover, soil_factor, land_type, soil_desc, slope_pct, elevation = 0, 0.5, 1.0, "Bilinmiyor", "Bilinmiyor", 0, 0
+        else:
+            ndvi = gee_res["ndvi"]
+            K_cover = 1.0 - clamp((1.0 - gee_res["k"]) * 1.0)
+            
+            land_map = {10: "Ormanlık", 20: "Çalılık", 30: "Çayır/Park", 40: "Tarım", 50: "Kentsel/Beton", 60: "Çıplak", 80: "Su"}
+            land_type = land_map.get(int(round(gee_res["land"]/10)*10), "Karma Alan")
+            
+            soil_factor, soil_desc = 1.0, "Normal Toprak"
+            if gee_res["soil"] in [1, 2, 3]: soil_factor, soil_desc = 1.25, "Killi (Geçirimsiz)"
+            elif gee_res["soil"] in [9, 10, 11, 12]: soil_factor, soil_desc = 0.85, "Kumlu (Geçirgen)"
+            
+            slope_pct = gee_res["slope"] * 1.5
+            elevation = gee_res["elev"]
+
+        W_star, R_ext, maxRain, meanRain = weather_res
+
+        # --- SU KONTROLÜ ---
         if elevation <= 0 or land_type == "Su":
              return jsonify({"status": "success", "location_type": "Su Kütlesi", "selected_system": "hybrid", "material": "-", "system_reasoning": "Su kütlesi.", "scores": {}, "eco_stats": {"harvest":0, "bio_solution":"-"}, "rain_stats": {"mean":0, "max":0}, "Q_flow": 0, "pipe_diameter_mm": 0, "FloodRisk": 0, "FloodRiskLevel": "N/A", "K_value": 0, "ndvi": 0, "slope_percent": 0, "debug_analysis_area_ha": 0})
 
-        W_star, R_ext, maxRain, meanRain = get_rain_10years(center_lat, center_lon)
-
-        # HESAPLAMALAR
+        # --- HESAPLAMALAR ---
         S = clamp(slope_pct / 20.0)
         veg_factor = 1.0 - (ndvi * 0.30) if ndvi > 0.2 else 1.0
         C = clamp((1.0 - K_cover) * soil_factor * veg_factor)
@@ -159,7 +177,7 @@ def analyze():
         
         FloodRisk = clamp((0.45*(0.6*W_star+0.4*R_ext) + 0.45*C + 0.1*abs(2*S-1)) + max(0, R_ext-0.75)*0.4 + (1-W_star)*0.3)
         S_mid = 1.0 - abs(2.0 * S - 1.0)
-        
+
         scores = {
             "dendritic": round(0.40 * S_mid + 0.40 * FloodRisk + 0.20 * K_final, 3),
             "parallel": round(0.50 * S + 0.30 * K_final + 0.20 * (1 - FloodRisk), 3),
