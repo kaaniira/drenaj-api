@@ -1,8 +1,8 @@
 # ============================================================
-#  BİYOMİMİKRİ DRENAJ SİSTEMİ — v15.1 (10M HIGH PRECISION)
+#  BİYOMİMİKRİ DRENAJ SİSTEMİ — v16.0 (CLOUD RUN OPTIMIZED)
 # ============================================================
 
-from flask import Flask, request, jsonify, make_response
+from flask import Flask, request, jsonify
 from flask_cors import CORS
 import requests
 import math
@@ -11,8 +11,11 @@ import os
 import google.auth
 import logging
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
+from functools import lru_cache
 
-logging.basicConfig(level=logging.INFO)
+# Logging Ayarı
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 app = Flask(__name__)
 
 # CORS
@@ -25,34 +28,49 @@ def after_request(response):
     response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
     return response
 
-# GEE Başlatma
+# --- GEE BAŞLATMA ---
 def initialize_gee():
     try:
         credentials, project = google.auth.default(
             scopes=['https://www.googleapis.com/auth/earthengine', 'https://www.googleapis.com/auth/cloud-platform']
         )
         ee.Initialize(credentials, project=project)
-        logging.info("GEE Başlatıldı.")
+        logging.info("GEE Başarıyla Başlatıldı.")
     except Exception as e:
-        logging.error(f"GEE Başlatma Hatası: {e}")
+        logging.error(f"GEE Başlatma Kritik Hatası: {e}")
 
 initialize_gee()
 
 def clamp(v, vmin=0.0, vmax=1.0):
     return max(vmin, min(vmax, v))
 
-# --- GEE VERİ ÇEKME (THREAD İÇİNDE) ---
-def get_gee_data_task(geometry):
+# --- GEE VERİ ÇEKME (OPTİMİZE EDİLMİŞ) ---
+def get_gee_data_task(geometry, radius):
     """
-    Ölçek 10m olarak sabitlendi.
-    Büyük alanlarda hata vermemesi için tileScale=8 yapıldı.
+    Optimize Edilmiş GEE Görevi:
+    Alan büyüdükçe scale (ölçek) değerini artırarak işlem süresini kısaltır.
     """
     try:
+        # Dinamik Scale Hesabı (Hızın anahtarı burası)
+        # Küçük alan: Yüksek detay (10m)
+        # Büyük alan: Düşük detay (30m - 100m)
+        calc_scale = 10
+        if radius > 300: calc_scale = 20
+        if radius > 1000: calc_scale = 50
+        if radius > 5000: calc_scale = 100
+
+        # Tarih aralığını dinamik yapalım (Son yaz dönemi)
+        now = datetime.now()
+        year = now.year - 1
+        start_date = f"{year}-06-01"
+        end_date = f"{year}-09-30"
+
         s2 = (ee.ImageCollection("COPERNICUS/S2_SR")
               .filterBounds(geometry)
-              .filterDate("2023-06-01", "2023-09-30")
-              .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 10))
+              .filterDate(start_date, end_date)
+              .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 15))
               .median())
+        
         ndvi_img = s2.normalizedDifference(["B8", "B4"]).rename("ndvi")
 
         dataset = ee.ImageCollection("ESA/WorldCover/v200").first()
@@ -72,14 +90,14 @@ def get_gee_data_task(geometry):
             dem.select("elevation").rename("elevation")
         ])
         
-        # --- HASSASİYET AYARI: 10 METRE ---
+        # --- OPTİMİZE EDİLMİŞ REDUCER ---
         stats = combined.reduceRegion(
             reducer=ee.Reducer.mean(), 
             geometry=geometry, 
-            scale=10,       # <-- İSTEĞİNİZ ÜZERİNE 10m SABİTLENDİ
-            bestEffort=True, 
-            maxPixels=1e9,
-            tileScale=8     # 10m işlemciyi yorar, bunu artırarak belleği rahatlatıyoruz
+            scale=calc_scale,       # Dinamik ölçek kullanılıyor
+            bestEffort=True,        # GEE'nin gerekirse ölçeği artırmasına izin ver
+            maxPixels=1e8,          # Çok büyük istekleri yönet
+            tileScale=4             # Paralelliği dengele
         ).getInfo()
 
         if not stats: return None
@@ -97,21 +115,36 @@ def get_gee_data_task(geometry):
         logging.error(f"GEE Task Hatası: {e}")
         return None
 
-# --- YAĞMUR VERİSİ ---
-def get_weather_data_task(lat, lon):
+# --- YAĞMUR VERİSİ (CACHED) ---
+@lru_cache(maxsize=128) # Sık sorulan koordinatları önbelleğe alır
+def get_weather_data_cached(lat, lon):
     try:
-        url = f"https://archive-api.open-meteo.com/v1/archive?latitude={lat}&longitude={lon}&start_date=2015-01-01&end_date=2024-12-31&daily=precipitation_sum&timezone=UTC"
-        r = requests.get(url, timeout=5).json()
+        # Tarihleri dinamik hale getir (Bugün - 9 yıl)
+        end_date = datetime.now().strftime("%Y-%m-%d")
+        start_year = datetime.now().year - 9
+        start_date = f"{start_year}-01-01"
+
+        url = f"https://archive-api.open-meteo.com/v1/archive?latitude={lat}&longitude={lon}&start_date={start_date}&end_date={end_date}&daily=precipitation_sum&timezone=UTC"
+        
+        # Timeout eklendi (takılmayı önlemek için)
+        r = requests.get(url, timeout=4).json()
         clean = [d for d in r.get("daily", {}).get("precipitation_sum", []) if d is not None]
         
         if not clean: return 0.5, 0.5, 50.0, 500.0
         
-        meanA = sum(clean) / 10.0
+        meanA = sum(clean) / (len(clean) / 365.25) # Yıllık ortalama tahmini
+        if meanA == 0: meanA = 500.0
+        
         maxD = max(clean)
         return clamp(meanA/1000.0), clamp(maxD/120.0), maxD, meanA
     except Exception as e:
         logging.error(f"Weather Task Hatası: {e}")
         return 0.5, 0.5, 50.0, 500.0
+
+# ThreadPool sarmalayıcısı (Cache ile uyumlu olması için)
+def get_weather_wrapper(lat, lon):
+    # Cache float hassasiyetini sever, koordinatları yuvarlayalım
+    return get_weather_data_cached(round(lat, 4), round(lon, 4))
 
 @app.route("/analyze", methods=["POST", "OPTIONS"])
 def analyze():
@@ -138,15 +171,16 @@ def analyze():
             analysis_area_m2 = math.pi * (radius ** 2.0)
             L_flow = radius * 2.0
 
-        # --- PARALEL İŞLEME (HIZ İÇİN) ---
+        # --- PARALEL İŞLEME ---
         with ThreadPoolExecutor(max_workers=2) as executor:
-            future_gee = executor.submit(get_gee_data_task, ee_geometry) # Scale artık fonk. içinde 10 sabit
-            future_weather = executor.submit(get_weather_data_task, center_lat, center_lon)
+            # radius parametresini ekledik
+            future_gee = executor.submit(get_gee_data_task, ee_geometry, radius)
+            future_weather = executor.submit(get_weather_wrapper, center_lat, center_lon)
 
             gee_res = future_gee.result()
             weather_res = future_weather.result()
 
-        # Veri Atama
+        # Veri Atama & Fallback
         if not gee_res:
             ndvi, K_cover, soil_factor, land_type, soil_desc, slope_pct, elevation = 0, 0.5, 1.0, "Bilinmiyor", "Bilinmiyor", 0, 0
         else:
@@ -167,9 +201,15 @@ def analyze():
 
         # --- SU KONTROLÜ ---
         if elevation <= 0 or land_type == "Su":
-             return jsonify({"status": "success", "location_type": "Su Kütlesi", "selected_system": "hybrid", "material": "-", "system_reasoning": "Su kütlesi.", "scores": {}, "eco_stats": {"harvest":0, "bio_solution":"-"}, "rain_stats": {"mean":0, "max":0}, "Q_flow": 0, "pipe_diameter_mm": 0, "FloodRisk": 0, "FloodRiskLevel": "N/A", "K_value": 0, "ndvi": 0, "slope_percent": 0, "debug_analysis_area_ha": 0})
+             return jsonify({
+                 "status": "success", "location_type": "Su Kütlesi", "selected_system": "hybrid", 
+                 "material": "-", "system_reasoning": "Su kütlesi.", "scores": {}, 
+                 "eco_stats": {"harvest":0, "bio_solution":"-"}, "rain_stats": {"mean":0, "max":0}, 
+                 "Q_flow": 0, "pipe_diameter_mm": 0, "FloodRisk": 0, "FloodRiskLevel": "N/A", 
+                 "K_value": 0, "ndvi": 0, "slope_percent": 0, "debug_analysis_area_ha": 0
+             })
 
-        # --- HESAPLAMALAR ---
+        # --- BİYOMİMİKRİ ALGORİTMASI ---
         S = clamp(slope_pct / 20.0)
         veg_factor = 1.0 - (ndvi * 0.30) if ndvi > 0.2 else 1.0
         C = clamp((1.0 - K_cover) * soil_factor * veg_factor)
@@ -248,5 +288,3 @@ def analyze():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
-
-application = app
