@@ -8,32 +8,29 @@ import requests
 import math
 import ee
 import os
+import google.auth # Bunu eklemeyi unutmayın
 
 app = Flask(__name__)
 CORS(app)
 
-# --- GEE YETKİLENDİRME ---
-import google.auth
-
+# --- 1. GEE YETKİLENDİRME (DÜZELTİLMİŞ) ---
 def initialize_gee():
     try:
-        # 1. YÖNTEM: Cloud Run Ortamında Otomatik Kimlik (En Sağlıklısı)
-        # Bu yöntem Cloud Run'a tanımladığınız Service Account'u otomatik algılar.
-        # JSON dosyası aramaz, ortam değişkenlerini kullanır.
+        # Cloud Run ve Local için en güvenli ve modern yöntem (ADC)
         credentials, project = google.auth.default(
             scopes=['https://www.googleapis.com/auth/earthengine', 'https://www.googleapis.com/auth/cloud-platform']
         )
-        
         ee.Initialize(credentials, project=project)
-        print("GEE Başlatıldı (Cloud Run ADC Yöntemi)")
-        
+        print("GEE Başlatıldı (Google Auth - ADC)")
     except Exception as e:
         print(f"GEE Başlatma Hatası: {e}")
-        # İsterseniz burada eski JSON yöntemini 'try-except' içinde yedek olarak tutabilirsiniz
-        # ama Cloud Run için yukarıdaki yeterlidir.
 
-# Uygulama başlarken çalıştır
 initialize_gee()
+
+# --- 2. CLAMP FONKSİYONU (BU EKSİK OLDUĞU İÇİN HATA ALIYORSUNUZ) ---
+def clamp(v, vmin=0.0, vmax=1.0):
+    return max(vmin, min(vmax, v))
+
 
 
 
