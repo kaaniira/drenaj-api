@@ -1,5 +1,5 @@
 # ============================================================
-#  BİYOMİMİKRİ DRENAJ SİSTEMİ — v13.5 (PERFORMANCE FIX)
+#  BİYOMİMİKRİ DRENAJ SİSTEMİ — v14.0 (TURBO & DYNAMIC SCALE)
 # ============================================================
 
 from flask import Flask, request, jsonify, make_response
@@ -14,7 +14,7 @@ import logging
 logging.basicConfig(level=logging.INFO)
 app = Flask(__name__)
 
-# CORS Ayarları
+# CORS: Her yerden erişime izin ver
 CORS(app, resources={r"/*": {"origins": "*"}})
 
 @app.after_request
@@ -24,7 +24,6 @@ def after_request(response):
     response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
     return response
 
-# GEE Başlatma
 def initialize_gee():
     try:
         credentials, project = google.auth.default(
@@ -40,14 +39,14 @@ initialize_gee()
 def clamp(v, vmin=0.0, vmax=1.0):
     return max(vmin, min(vmax, v))
 
-# --- TEK SEFERDE TÜM VERİYİ ÇEKEN FONKSİYON (PERFORMANS İÇİN) ---
-def get_all_map_data(geometry):
+# --- OPTİMİZE EDİLMİŞ VERİ ÇEKME ---
+def get_all_map_data(geometry, scale_val):
     """
-    NDVI, Eğim, Yükseklik, Toprak ve Arazi verilerini tek bir GEE isteği ile çeker.
-    Bu yöntem Timeout hatalarını önler.
+    scale_val parametresi ile çözünürlüğü dinamik ayarlar.
+    Line modunda 30m, Point modunda 10m çalışır.
     """
     try:
-        # 1. NDVI Hesabı (Sentinel-2)
+        # 1. Görüntüleri Hazırla (Lazy Evaluation - Henüz işlem yapmaz)
         s2 = (ee.ImageCollection("COPERNICUS/S2_SR")
               .filterBounds(geometry)
               .filterDate("2023-06-01", "2023-09-30")
@@ -55,27 +54,27 @@ def get_all_map_data(geometry):
               .median())
         ndvi_img = s2.normalizedDifference(["B8", "B4"]).rename("ndvi")
 
-        # 2. Arazi Örtüsü (WorldCover)
         dataset = ee.ImageCollection("ESA/WorldCover/v200").first()
         from_cls = [10, 20, 30, 40, 50, 60, 80, 90, 95, 100]
         to_k = [0.90, 0.80, 0.85, 0.60, 0.15, 0.50, 0.00, 0.00, 0.90, 0.90]
         k_img = dataset.remap(from_cls, to_k, 0.5).rename("k_value")
         land_cls_img = dataset.rename("land_class")
 
-        # 3. Toprak ve DEM
         soil_img = ee.Image("OpenLandMap/SOL/SOL_TEXTURE-CLASS_USDA-TT_M/v02").select("b0").rename("soil_type")
+        
         dem = ee.Image("USGS/SRTMGL1_003")
         elev_img = dem.select("elevation").rename("elevation")
         slope_img = ee.Terrain.slope(dem).rename("slope")
 
-        # 4. BİRLEŞTİR VE TEK İSTEK AT
+        # 2. Hepsini Paketle
         combined = ee.Image.cat([ndvi_img, k_img, land_cls_img, soil_img, slope_img, elev_img])
         
-        # Scale 20m optimumdur (Hız/Kalite dengesi)
+        # 3. Sunucuya Gönder (CRITICAL STEP)
+        # bestEffort=True: Eğer alan çok büyükse ve 30m yetmezse, GEE otomatik olarak ölçeği büyütüp hata vermeden cevap döner.
         stats = combined.reduceRegion(
             reducer=ee.Reducer.mean(), 
             geometry=geometry, 
-            scale=20, 
+            scale=scale_val, 
             bestEffort=True, 
             maxPixels=1e9
         ).getInfo()
@@ -83,7 +82,7 @@ def get_all_map_data(geometry):
         if not stats: 
             return 0.0, 0.5, 1.0, "Bilinmiyor", "Bilinmiyor", 0.0, 0.0
 
-        # 5. Verileri Ayrıştır
+        # 4. Sonuçları İşle
         ndvi_val = float(stats.get("ndvi", 0.0))
         mean_k = float(stats.get("k_value", 0.5))
         slope_val = float(stats.get("slope", 0.0))
@@ -91,7 +90,6 @@ def get_all_map_data(geometry):
         land_cls_val = round(stats.get("land_class", 0))
         soil_cls_val = round(stats.get("soil_type", 0))
 
-        # Sözel Çevirimler
         land_map = {10: "Ormanlık", 20: "Çalılık", 30: "Çayır/Park", 40: "Tarım", 50: "Kentsel/Beton", 60: "Çıplak", 80: "Su"}
         land_type = land_map.get(int(round(land_cls_val/10)*10), "Karma Alan")
         
@@ -108,14 +106,13 @@ def get_all_map_data(geometry):
 def get_rain_10years(lat, lon):
     try:
         url = f"https://archive-api.open-meteo.com/v1/archive?latitude={lat}&longitude={lon}&start_date=2015-01-01&end_date=2024-12-31&daily=precipitation_sum&timezone=UTC"
-        r = requests.get(url, timeout=5).json()
+        r = requests.get(url, timeout=4).json() # Timeout düşürüldü
         clean = [d for d in r.get("daily", {}).get("precipitation_sum", []) if d is not None]
         if not clean: return 0.5, 0.5, 50.0, 500.0
         return clamp(sum(clean)/10000.0), clamp(max(clean)/120.0), max(clean), sum(clean)/10.0
     except Exception:
         return 0.5, 0.5, 50.0, 500.0
 
-# --- ANA ANALİZ ---
 @app.route("/analyze", methods=["POST", "OPTIONS"])
 def analyze():
     if request.method == "OPTIONS":
@@ -126,7 +123,11 @@ def analyze():
         mode = d.get("mode", "point")
         radius = float(d.get("radius", 100.0))
         
-        # Geometri Hazırla
+        # --- DİNAMİK ÖLÇEK AYARI ---
+        # Line (Hat) modu çok geniş alan taradığı için 30m kullanıyoruz.
+        # Point (Nokta) modu küçük olduğu için 10m hassas tarıyoruz.
+        dynamic_scale = 10 if mode == "point" else 30
+
         if mode == "line":
             start, end = d["start"], d["end"]
             line = ee.Geometry.LineString([[start["lon"], start["lat"]], [end["lon"], end["lat"]]])
@@ -142,10 +143,9 @@ def analyze():
             analysis_area_m2 = math.pi * (radius ** 2.0)
             L_flow = radius * 2.0
 
-        # --- TEK SEFERDE TÜM VERİYİ AL ---
-        ndvi, K_cover, soil_factor, land_type, soil_desc, slope_pct, elevation = get_all_map_data(ee_geometry)
+        # Verileri Çek
+        ndvi, K_cover, soil_factor, land_type, soil_desc, slope_pct, elevation = get_all_map_data(ee_geometry, dynamic_scale)
         
-        # Su ve Hata Kontrolü
         if elevation <= 0 or land_type == "Su":
              return jsonify({"status": "success", "location_type": "Su Kütlesi", "selected_system": "hybrid", "material": "-", "system_reasoning": "Su kütlesi.", "scores": {}, "eco_stats": {"harvest":0, "bio_solution":"-"}, "rain_stats": {"mean":0, "max":0}, "Q_flow": 0, "pipe_diameter_mm": 0, "FloodRisk": 0, "FloodRiskLevel": "N/A", "K_value": 0, "ndvi": 0, "slope_percent": 0, "debug_analysis_area_ha": 0})
 
@@ -171,11 +171,10 @@ def analyze():
         }
         selected = max(scores, key=scores.get)
         
-        # Hidrolik
         S_metric = max(0.01, slope_pct / 100.0)
         t_c = max(5.0, min(45.0, 0.0195 * (math.pow(L_flow, 0.77) / math.pow(S_metric, 0.385))))
-        is_turkey = (35.5 <= center_lat <= 42.5) and (25.0 <= center_lon <= 45.0)
         
+        is_turkey = (35.5 <= center_lat <= 42.5) and (25.0 <= center_lon <= 45.0)
         if is_turkey:
              i_val = (maxRain / (24.0 ** 0.46)) * ((max(t_c/60.0, 0.1)) ** -0.54)
         else:
@@ -230,8 +229,6 @@ def analyze():
         return jsonify({"status": "error", "msg": str(e)}), 500
 
 if __name__ == "__main__":
-    # Gunicorn timeout artırma ipucu burada işe yaramaz, Dockerfile ile yapılmalı.
-    # Ancak local çalıştırma için port ayarı:
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
 
 application = app
