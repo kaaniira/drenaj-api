@@ -1,5 +1,5 @@
 # ============================================================
-#  BİYOMİMİKRİ DRENAJ SİSTEMİ — v15.2 (C Katsayısı Eklendi)
+#  BİYOMİMİKRİ DRENAJ SİSTEMİ — v15.3 (FINAL & STABLE)
 # ============================================================
 
 from flask import Flask, request, jsonify, make_response
@@ -10,12 +10,12 @@ import ee
 import os
 import google.auth
 import logging
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor # Eş Zamanlı İşleme (Hız)
 
 logging.basicConfig(level=logging.INFO)
 app = Flask(__name__)
 
-# CORS
+# CORS: Her yerden erişime izin ver (Mandatory Fix for 'great-site.net')
 CORS(app, resources={r"/*": {"origins": "*"}})
 
 @app.after_request
@@ -41,8 +41,9 @@ initialize_gee()
 def clamp(v, vmin=0.0, vmax=1.0):
     return max(vmin, min(vmax, v))
 
-# --- GEE VERİ ÇEKME ---
+# --- GEE VERİ ÇEKME (THREAD İÇİNDE) ---
 def get_gee_data_task(geometry):
+    """ Tüm coğrafi verileri 10m hassasiyetle tek seferde çeker. """
     try:
         s2 = (ee.ImageCollection("COPERNICUS/S2_SR")
               .filterBounds(geometry)
@@ -68,13 +69,14 @@ def get_gee_data_task(geometry):
             dem.select("elevation").rename("elevation")
         ])
         
+        # 10 METRE HASSASİYET (İşlem yükü yüksek)
         stats = combined.reduceRegion(
             reducer=ee.Reducer.mean(), 
             geometry=geometry, 
             scale=10,       
             bestEffort=True, 
             maxPixels=1e9,
-            tileScale=8     
+            tileScale=8     # Büyük alanlar için bellek sıkışmasını önler
         ).getInfo()
 
         if not stats: return None
@@ -118,6 +120,7 @@ def analyze():
         mode = d.get("mode", "point")
         radius = float(d.get("radius", 100.0))
 
+        # --- GEOMETRİ HAZIRLIĞI ---
         if mode == "line":
             start, end = d["start"], d["end"]
             line = ee.Geometry.LineString([[start["lon"], start["lat"]], [end["lon"], end["lat"]]])
@@ -132,6 +135,7 @@ def analyze():
             analysis_area_m2 = math.pi * (radius ** 2.0)
             L_flow = radius * 2.0
 
+        # --- PARALEL İŞLEME (HIZ İÇİN) ---
         with ThreadPoolExecutor(max_workers=2) as executor:
             future_gee = executor.submit(get_gee_data_task, ee_geometry)
             future_weather = executor.submit(get_weather_data_task, center_lat, center_lon)
@@ -139,6 +143,7 @@ def analyze():
             gee_res = future_gee.result()
             weather_res = future_weather.result()
 
+        # Veri Atama
         if not gee_res:
             ndvi, K_cover, soil_factor, land_type, soil_desc, slope_pct, elevation = 0, 0.5, 1.0, "Bilinmiyor", "Bilinmiyor", 0, 0
         else:
@@ -157,15 +162,18 @@ def analyze():
 
         W_star, R_ext, maxRain, meanRain = weather_res
 
-        if elevation <= 0 or land_type == "Su":
+        # --- YANLIŞ SU TESPİTİ KONTROLÜ (Softened Check) ---
+        is_water_strict = land_type == "Su" or elevation < 3.0
+        is_urban_or_agriculture = land_type in ["Kentsel/Beton", "Tarım", "Karma Alan"]
+        
+        if is_water_strict and not is_urban_or_agriculture:
              return jsonify({"status": "success", "location_type": "Su Kütlesi", "selected_system": "hybrid", "material": "-", "system_reasoning": "Su kütlesi.", "scores": {}, "eco_stats": {"harvest":0, "bio_solution":"-"}, "rain_stats": {"mean":0, "max":0}, "Q_flow": 0, "pipe_diameter_mm": 0, "FloodRisk": 0, "FloodRiskLevel": "N/A", "K_value": 0, "C_value": 0, "ndvi": 0, "slope_percent": 0, "debug_analysis_area_ha": 0})
 
         # --- HESAPLAMALAR ---
         S = clamp(slope_pct / 20.0)
         veg_factor = 1.0 - (ndvi * 0.30) if ndvi > 0.2 else 1.0
         
-        # C HESABI (Bu değeri artık döndürüyoruz)
-        C = clamp((1.0 - K_cover) * soil_factor * veg_factor)
+        C = clamp((1.0 - K_cover) * soil_factor * veg_factor) # C Katsayısı
         K_final = 1.0 - C
         
         FloodRisk = clamp((0.45*(0.6*W_star+0.4*R_ext) + 0.45*C + 0.1*abs(2*S-1)) + max(0, R_ext-0.75)*0.4 + (1-W_star)*0.3)
@@ -222,7 +230,7 @@ def analyze():
             "ndvi": round(ndvi, 2),
             "slope_percent": round(slope_pct, 2),
             "K_value": round(K_final, 2),
-            "C_value": round(C, 2),  # <-- YENİ EKLENDİ
+            "C_value": round(C, 2), 
             "FloodRisk": round(FloodRisk, 2),
             "FloodRiskLevel": ["Çok Düşük", "Düşük", "Orta", "Yüksek", "Kritik"][min(int(FloodRisk*4.9), 4)],
             "selected_system": selected,
