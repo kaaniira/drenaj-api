@@ -360,6 +360,7 @@ def analyze():
            "Q_flow": round(Q_future, 3),
            "rain_stats": {"mean": round(meanRain, 1), "max": round(maxRain, 1)},
            "eco_stats": {"harvest": round(harvest, 0), "bio_solution": bio_solution},
+           "debug_analysis_area_ha": round(analysis_area_m2 / 10000.0, 2),
            "debug_info": {
                "L_flow_m": round(L_flow, 1),
                "area_m2": round(analysis_area_m2, 0)
