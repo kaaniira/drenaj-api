@@ -1,8 +1,8 @@
 # ============================================================
-#  BİYOMİMİKRİ DRENAJ SİSTEMİ — v13.2 (VERIFIED & VALIDATED)
-#  1. Exact Gumbel K_T Formula (Academic Standard)
-#  2. Manning Reverse Validation (Q_check)
-#  3. Velocity Constraints Check (0.5 < V < 4.0 m/s)
+#  BİYOMİMİKRİ DRENAJ SİSTEMİ — v13.2 
+#  
+#  
+#  
 # ============================================================
 
 from flask import Flask, request, jsonify
